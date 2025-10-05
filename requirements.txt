@@ -1,0 +1,9 @@
+jupyterlab
+spacy
+langchain
+streamlit
+transformers
+torch
+sentencepiece
+rouge-score
+langchain-community

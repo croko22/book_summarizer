@@ -1,5 +1,3 @@
-streamlit run app.py
-
 # Book Summarization Application
 
 This is a web application for generating concise summaries of long texts and documents. The system leverages large language models (LLMs) through the LangChain and Hugging Face Transformers libraries, providing a simple interface for end-users.

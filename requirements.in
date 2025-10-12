@@ -1,0 +1,16 @@
+# Framework de la App
+streamlit
+
+# Core de IA y LangChain
+langchain
+openai
+transformers
+torch
+sentencepiece
+accelerate
+
+# Procesadores de Archivos
+pypdf
+python-docx
+EbookLib
+beautifulsoup4

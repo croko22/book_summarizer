@@ -1,118 +1,157 @@
 from abc import ABC, abstractmethod
 from typing import Optional
 import torch
-from transformers import pipeline
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
-# --------------------------------------------------------------------------
-# 1. CLASE BASE (LA INTERFAZ)
-# Define la estructura que todos nuestros proveedores deben seguir.
-# --------------------------------------------------------------------------
 class SummarizationProvider(ABC):
-    """Clase base abstracta para cualquier proveedor de modelos de resumen."""
     
-    def __init__(self, model_name: str, api_key: Optional[str] = None):
+    def __init__(self, model_name: str = None):
         self.model_name = model_name
-        self.api_key = api_key
-        print(f"Provider '{self.__class__.__name__}' inicializado con el modelo '{self.model_name}'.")
 
     @abstractmethod
-    def summarize(self, text: str, max_length: int, min_length: int) -> str:
-        """
-        Método abstracto para generar un resumen.
-        'text' puede ser un texto simple o un prompt complejo.
-        """
+    def summarize(self, text: str, max_length: int = 500, min_length: int = 50) -> str:
         pass
 
-# --------------------------------------------------------------------------
-# 2. PROVEEDOR PARA LA API DE OPENAI (GPT)
-# Ideal para la estrategia "Incremental / Refine" por su capacidad de seguir instrucciones.
-# --------------------------------------------------------------------------
-try:
-    from openai import OpenAI
-except ImportError:
-    print("Advertencia: La librería 'openai' no está instalada. OpenAIProvider no estará disponible.")
-    OpenAI = None
-
-class OpenAIProvider(SummarizationProvider):
-    """Proveedor para modelos de OpenAI como GPT-3.5-turbo o GPT-4."""
+class GemmaBookSumProvider(SummarizationProvider):
+    _tokenizer = None
+    _model = None
     
-    def __init__(self, model_name: str = "gpt-3.5-turbo", api_key: Optional[str] = None):
-        if not OpenAI:
-            raise ImportError("Por favor, instala la librería de OpenAI con 'pip install openai'")
-        if not api_key:
-            raise ValueError("Se requiere una API key para usar OpenAIProvider.")
+    def __init__(self, model_name: str = "croko22/gemma-booksum-lora-v1"):
+        super().__init__(model_name)
+        if GemmaBookSumProvider._tokenizer is None:
+            GemmaBookSumProvider._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            
+            if GemmaBookSumProvider._tokenizer.pad_token is None:
+                GemmaBookSumProvider._tokenizer.pad_token = GemmaBookSumProvider._tokenizer.eos_token
+            
+            GemmaBookSumProvider._model = AutoModelForCausalLM.from_pretrained(
+                self.model_name,
+                dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                device_map="auto" if torch.cuda.is_available() else None,
+                trust_remote_code=True
+            )
+            
+            if not torch.cuda.is_available():
+                device = "cpu"
+                GemmaBookSumProvider._model.to(device)
+            
+    def summarize(self, text: str, max_length: int = 500, min_length: int = 50) -> str:
+        prompt = f"Resume el siguiente texto:\n\n{text}\n\nResumen:"
         
-        super().__init__(model_name, api_key)
-        self.client = OpenAI(api_key=self.api_key)
-
-    def summarize(self, text: str, max_length: int, min_length: int) -> str:
-        # Los modelos de chat no usan min/max length, sino max_tokens.
-        # Hacemos una conversión aproximada.
-        max_tokens = int(max_length * 1.5)
-
-        response = self.client.chat.completions.create(
-            model=self.model_name,
-            messages=[
-                {"role": "system", "content": "You are a highly skilled AI trained in summarizing text."},
-                {"role": "user", "content": text} # 'text' aquí ya contiene el prompt completo
-            ],
-            temperature=0.5,
-            max_tokens=max_tokens,
-        )
-        return response.choices[0].message.content.strip()
-
-# --------------------------------------------------------------------------
-# 3. PROVEEDOR PARA MODELOS DE INSTRUCCIONES DE HUGGING FACE (LOCAL)
-# Usa modelos como Flan-T5, que son gratuitos y buenos para la estrategia "Refine".
-# --------------------------------------------------------------------------
-class HuggingFaceInstructionProvider(SummarizationProvider):
-    """Proveedor para modelos de texto-a-texto (instrucciones) de Hugging Face."""
-    _pipeline = None
-
-    def __init__(self, model_name: str = "google/flan-t5-base"):
-        super().__init__(model_name)
-        if HuggingFaceInstructionProvider._pipeline is None:
-            device = 0 if torch.cuda.is_available() else -1
-            HuggingFaceInstructionProvider._pipeline = pipeline(
-                "text2text-generation",  # Tarea clave para modelos de instrucciones
-                model=self.model_name,
-                device=device,
+        inputs = self._tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
+        
+        if torch.cuda.is_available():
+            inputs = {k: v.cuda() for k, v in inputs.items()}
+        
+        with torch.no_grad():
+            outputs = self._model.generate(
+                **inputs,
+                max_new_tokens=max_length,
+                min_new_tokens=min_length,
+                temperature=0.7,
+                do_sample=True,
+                pad_token_id=self._tokenizer.eos_token_id
             )
-
-    def summarize(self, text: str, max_length: int, min_length: int) -> str:
-        result = self._pipeline(
-            text, 
-            max_length=max_length, 
-            min_length=min_length, 
-            do_sample=False
-        )
-        return result[0]["generated_text"].strip()
-
-# --------------------------------------------------------------------------
-# 4. PROVEEDOR PARA MODELOS DE RESUMEN DE HUGGING FACE (LOCAL)
-# Este es para tu modelo original (DistilBART) y es mejor para Map-Reduce.
-# --------------------------------------------------------------------------
-class HuggingFaceSummarizerProvider(SummarizationProvider):
-    """Proveedor para modelos específicos de resumen de Hugging Face."""
-    _pipeline = None
-
-    def __init__(self, model_name: str = "sshleifer/distilbart-cnn-12-6"):
-        super().__init__(model_name)
-        if HuggingFaceSummarizerProvider._pipeline is None:
-            device = 0 if torch.cuda.is_available() else -1
-            HuggingFaceSummarizerProvider._pipeline = pipeline(
-                "summarization",  # Tarea específica de resumen
-                model=self.model_name,
-                device=device,
-            )
+        
+        generated_text = self._tokenizer.decode(outputs[0], skip_special_tokens=True)
+        summary = generated_text.replace(prompt, "").strip()
+        
+        return summary
     
-    def summarize(self, text: str, max_length: int, min_length: int) -> str:
-        # Los prompts complejos de "Refine" no funcionarán bien aquí.
-        # Este modelo espera solo el texto a resumir.
-        result = self._pipeline(
-            text, 
-            max_length=max_length, 
-            min_length=min_length, 
-            truncation=True
-        )
-        return result[0]["summary_text"].strip()
+    def summarize_iterative(self, text: str, chunk_size: int = 4000, max_new_tokens: int = 300) -> str:
+        """
+        Procesa texto largo de forma iterativa usando el prompt específico del modelo.
+        Cada chunk actualiza el resumen anterior de forma incremental.
+        """
+        # Dividir texto en chunks
+        chunks = self._split_text(text, chunk_size)
+        
+        if not chunks:
+            return ""
+        
+        if len(chunks) == 1:
+            return self.summarize(text)
+        
+        current_summary = "No summary has been generated yet."
+        
+        for i, chunk in enumerate(chunks):
+            print(f"Procesando chunk {i+1}/{len(chunks)}...")
+            
+            # Crear contexto según tu estrategia
+            if i == 0:
+                context_text = chunk
+            else:
+                context_text = f"Here is the summary so far: '{current_summary}'. Now, update it with this new text: '{chunk}'"
+            
+            # Usar el prompt exacto de tu modelo
+            prompt = f"Summarize the following chapter:\n\n{context_text}\n\nSummary:"
+            
+            inputs = self._tokenizer(
+                prompt,
+                return_tensors="pt",
+                truncation=True,
+                max_length=8192  # Ventana larga para inferencia
+            )
+            
+            if torch.cuda.is_available():
+                inputs = {k: v.cuda() for k, v in inputs.items()}
+            
+            with torch.no_grad():
+                outputs = self._model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=True,
+                    temperature=0.7,
+                    top_p=0.9,
+                    repetition_penalty=1.15,
+                    pad_token_id=self._tokenizer.eos_token_id
+                )
+            
+            # Extraer solo el texto generado (sin el prompt)
+            generated_text = self._tokenizer.decode(
+                outputs[0][inputs['input_ids'].shape[1]:], 
+                skip_special_tokens=True
+            )
+            current_summary = generated_text.strip()
+        
+        return current_summary
+    
+    def _split_text(self, text: str, chunk_size: int) -> list[str]:
+        """Divide el texto en chunks preservando párrafos cuando es posible."""
+        if len(text) <= chunk_size:
+            return [text]
+        
+        chunks = []
+        current_chunk = ""
+        
+        # Intentar dividir por párrafos primero
+        paragraphs = text.split('\n\n')
+        
+        for paragraph in paragraphs:
+            if len(current_chunk) + len(paragraph) + 2 <= chunk_size:
+                if current_chunk:
+                    current_chunk += "\n\n" + paragraph
+                else:
+                    current_chunk = paragraph
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk)
+                    current_chunk = paragraph
+                else:
+                    # Párrafo muy largo, dividir por oraciones
+                    sentences = paragraph.split('. ')
+                    for sentence in sentences:
+                        if len(current_chunk) + len(sentence) + 2 <= chunk_size:
+                            if current_chunk:
+                                current_chunk += ". " + sentence
+                            else:
+                                current_chunk = sentence
+                        else:
+                            if current_chunk:
+                                chunks.append(current_chunk)
+                            current_chunk = sentence
+        
+        if current_chunk:
+            chunks.append(current_chunk)
+        
+        return chunks

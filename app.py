@@ -20,6 +20,39 @@ def get_provider():
 def get_database():
     return SummaryDatabase()
 
+
+@st.dialog("Detalles del Resumen", width="large")
+def show_summary_details(item):
+    st.write(f"**Fecha:** {item['timestamp']}")
+    st.write(f"**Método:** {item['method']}")
+    st.write(f"**Palabras:** {item['word_count']}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        markdown_content = f"# Resumen de Texto\n\n**Fecha:** {item['timestamp']}\n\n**Método:** {item['method']}\n\n**Palabras:** {item['word_count']}\n\n## Resumen\n\n{item['summary']}"
+        st.download_button(
+            label="Descargar MD",
+            icon=":material/markdown:",
+            data=markdown_content,
+            file_name=f"resumen_{item['id']}.md",
+            mime="text/markdown",
+            use_container_width=True
+        )
+    with col2:
+        if st.button("Borrar del Historial", icon=":material/delete:", key=f"delete_{item['id']}", use_container_width=True):
+            db = get_database()
+            db.delete_summary(item['id'])
+            st.rerun()
+
+
+    st.markdown("---")
+    
+    with st.expander("📄 Ver Resumen Generado", expanded=True):
+        st.markdown(item['summary'])
+        
+    with st.expander("📝 Ver Texto Original", expanded=False):
+        st.markdown(item['original_text'])
+
 def render_sidebar():
     st.sidebar.title("⚙️ Configuración")
     st.sidebar.info("Usando modelo: croko22/gemma-booksum-lora-v1")
@@ -34,9 +67,6 @@ def render_sidebar():
     if st.sidebar.button("🔄 Reiniciar Modelo", help="Limpia el cache y recarga el modelo"):
         st.cache_resource.clear()
         st.rerun()
-    
-    if method == "Iterativo (Recomendado)":
-        st.sidebar.info("💡 Si ves error 'no attribute summarize_iterative', presiona 🔄 Reiniciar Modelo")
     
     st.sidebar.markdown("---")
     st.sidebar.subheader("📊 Estadísticas")
@@ -64,21 +94,10 @@ def render_sidebar():
     
     if recent_summaries:
         for item in recent_summaries:
-            with st.sidebar.expander(f"Resumen #{item['id']} - {item['timestamp'][:10]}"):
-                st.write(f"**Fecha:** {item['timestamp']}")
-                st.write(f"**Método:** {item['method']}")
-                st.write(f"**Palabras:** {item['word_count']}")
-                st.write(f"**Texto:** {item['original_text'][:100]}...")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.button("📋 Restaurar", key=f"restore_{item['id']}"):
-                        st.session_state.summary = item['summary']
-                        st.rerun()
-                with col2:
-                    if st.button("🗑️ Borrar", key=f"delete_{item['id']}"):
-                        db.delete_summary(item['id'])
-                        st.rerun()
+            # Formato corto de fecha: DD/MM HH:MM
+            short_date = item['timestamp'][8:16].replace(' ', ' ')
+            if st.sidebar.button(f"#{item['id']} | {short_date}", key=f"btn_summary_{item['id']}", use_container_width=True):
+                show_summary_details(item)
     else:
         if search_query:
             st.sidebar.info("No se encontraron resultados")
@@ -150,18 +169,58 @@ def main():
         
         try:
             start_time = time.time()
-            with st.spinner("Cargando modelo y procesando resumen..."):
-                provider = get_provider()
-                
-                if method == "Iterativo (Recomendado)":
-                    if hasattr(provider, 'summarize_iterative'):
-                        summary = provider.summarize_iterative(user_text)
-                    else:
-                        st.error("El método iterativo no está disponible. Presiona 🔄 Reiniciar Modelo en el sidebar.")
-                        return
+            
+            # Crear placeholder para la barra de progreso
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            provider = get_provider()
+            
+            if method == "Iterativo (Recomendado)":
+                if hasattr(provider, 'summarize_iterative'):
+                    # Calcular chunks para estimar progreso
+                    chunk_size = 4000
+                    estimated_chunks = max(1, len(user_text) // chunk_size + (1 if len(user_text) % chunk_size else 0))
+                    
+                    status_text.info(f"📊 Procesando texto en ~{estimated_chunks} chunks. Tiempo estimado: ~{estimated_chunks * 15}s")
+                    progress_bar.progress(5)
+                    
+                    # Función callback para actualizar progreso
+                    def update_progress(current, total):
+                        progress_percent = int((current / total) * 85) + 10  # 10-95%
+                        progress_bar.progress(progress_percent)
+                        status_text.info(f"🔄 Procesando chunk {current}/{total}... ({progress_percent}%)")
+                    
+                    # Intentar usar progress_callback si está disponible
+                    try:
+                        summary = provider.summarize_iterative(user_text, chunk_size=chunk_size, progress_callback=update_progress)
+                    except TypeError:
+                        # Versión antigua sin progress_callback - usar sin callback
+                        st.warning("⚠️ Modelo en versión antigua. Presiona '🔄 Reiniciar Modelo' para actualizar y ver progreso en tiempo real.")
+                        summary = provider.summarize_iterative(user_text, chunk_size=chunk_size)
+                    
+                    progress_bar.progress(95)
+                    status_text.info("✨ Finalizando resumen...")
                 else:
-                    summary = generate_summary_incremental(provider, user_text)
-                
+                    st.error("El método iterativo no está disponible. Presiona 🔄 Reiniciar Modelo en el sidebar.")
+                    progress_bar.empty()
+                    status_text.empty()
+                    return
+            else:
+                status_text.info("🔄 Procesando con método estándar...")
+                progress_bar.progress(20)
+                summary = generate_summary_incremental(provider, user_text)
+                progress_bar.progress(90)
+            
+            # Completar progreso
+            progress_bar.progress(100)
+            status_text.success("✅ ¡Resumen completado!")
+            time.sleep(0.5)  # Breve pausa para mostrar el 100%
+            
+            # Limpiar indicadores
+            progress_bar.empty()
+            status_text.empty()
+            
             processing_time = time.time() - start_time
             st.session_state.text_stats["processing_time"] = processing_time
             st.session_state.summary = summary
@@ -187,8 +246,8 @@ def main():
     if st.session_state.summary:
         st.header("✅ Resumen Generado")
         
-        # Mostrar el resumen usando componentes nativos que se adaptan al theme
-        st.success(st.session_state.summary)
+        # Mostrar el resumen con formato markdown nativo
+        st.markdown(st.session_state.summary)
         
         # Opciones de descarga y copia
         col1, col2, col3 = st.columns(3)
@@ -196,7 +255,8 @@ def main():
         with col1:
             # Botón para descargar como .txt
             st.download_button(
-                label="📄 Descargar TXT",
+                label="Descargar TXT",
+                icon=":material/description:",
                 data=st.session_state.summary,
                 file_name=f"resumen_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
                 mime="text/plain"
@@ -207,7 +267,8 @@ def main():
             markdown_content = f"# Resumen de Texto\n\n**Fecha:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n**Estadísticas del texto original:**\n- Palabras: {st.session_state.text_stats.get('words', 0)}\n- Caracteres: {st.session_state.text_stats.get('chars', 0)}\n\n## Resumen\n\n{st.session_state.summary}"
             
             st.download_button(
-                label="📝 Descargar MD",
+                label="Descargar MD",
+                icon=":material/markdown:",
                 data=markdown_content,
                 file_name=f"resumen_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
                 mime="text/markdown"
@@ -215,7 +276,7 @@ def main():
         
         with col3:
             # Botón para limpiar
-            if st.button("🗑️ Limpiar", help="Limpiar el resumen actual"):
+            if st.button("Limpiar", icon=":material/clear_all:", help="Limpiar el resumen actual"):
                 st.session_state.summary = ""
                 st.rerun()
         
@@ -223,7 +284,7 @@ def main():
         st.markdown("---")
         col1, col2, col3 = st.columns([1, 1, 1])
         with col2:
-            if st.button("📊 Exportar Historial Completo", help="Descargar todos los resúmenes en CSV"):
+            if st.button("Exportar Historial Completo", icon=":material/download:", help="Descargar todos los resúmenes en CSV"):
                 db = get_database()
                 csv_path = f"historial_completo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
                 
@@ -231,7 +292,8 @@ def main():
                     db.export_to_csv(csv_path)
                     with open(csv_path, 'r', encoding='utf-8') as f:
                         st.download_button(
-                            label="📥 Descargar CSV",
+                            label="Descargar CSV",
+                            icon=":material/csv:",
                             data=f.read(),
                             file_name=csv_path,
                             mime="text/csv"

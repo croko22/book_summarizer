@@ -58,10 +58,16 @@ class GemmaBookSumProvider(SummarizationProvider):
         
         return summary
     
-    def summarize_iterative(self, text: str, chunk_size: int = 4000, max_new_tokens: int = 300) -> str:
+    def summarize_iterative(self, text: str, chunk_size: int = 4000, max_new_tokens: int = 1200, progress_callback=None) -> str:
         """
         Procesa texto largo de forma iterativa usando el prompt específico del modelo.
         Cada chunk actualiza el resumen anterior de forma incremental.
+        
+        Args:
+            text: Texto a resumir
+            chunk_size: Tamaño de cada chunk
+            max_new_tokens: Tokens máximos a generar por chunk (default: 1200 para resúmenes detallados)
+            progress_callback: Función opcional para reportar progreso (recibe current, total)
         """
         # Dividir texto en chunks
         chunks = self._split_text(text, chunk_size)
@@ -70,27 +76,48 @@ class GemmaBookSumProvider(SummarizationProvider):
             return ""
         
         if len(chunks) == 1:
-            return self.summarize(text)
+            return self.summarize(text, max_length=1200)
         
-        current_summary = "No summary has been generated yet."
+        # Almacenar resúmenes parciales
+        chunk_summaries = []
+        accumulated_summary = ""
         
         for i, chunk in enumerate(chunks):
             print(f"Procesando chunk {i+1}/{len(chunks)}...")
             
-            # Crear contexto según tu estrategia
-            if i == 0:
-                context_text = chunk
-            else:
-                context_text = f"Here is the summary so far: '{current_summary}'. Now, update it with this new text: '{chunk}'"
+            # Reportar progreso si hay callback
+            if progress_callback:
+                progress_callback(i + 1, len(chunks))
             
-            # Usar el prompt exacto de tu modelo
-            prompt = f"Summarize the following chapter:\n\n{context_text}\n\nSummary:"
+            # Crear prompt según el chunk
+            if i == 0:
+                # Primer chunk: resumen inicial detallado
+                prompt = f"""Summarize the following text in detail, capturing all key points, main ideas, and important details. Use markdown formatting with sections and bullet points:
+
+{chunk}
+
+Detailed Summary:"""
+            else:
+                # Chunks siguientes: expandir el resumen con nueva información
+                prompt = f"""## Current Summary:
+{accumulated_summary}
+
+## New Text Section:
+{chunk}
+
+Provide an updated and expanded summary that:
+1. Incorporates all new information from the text above
+2. Maintains all important details from the current summary
+3. Uses markdown formatting with headers, bullet points, and sections
+4. Is comprehensive and detailed
+
+Updated Summary:"""
             
             inputs = self._tokenizer(
                 prompt,
                 return_tensors="pt",
                 truncation=True,
-                max_length=8192  # Ventana larga para inferencia
+                max_length=8192
             )
             
             if torch.cuda.is_available():
@@ -100,6 +127,7 @@ class GemmaBookSumProvider(SummarizationProvider):
                 outputs = self._model.generate(
                     **inputs,
                     max_new_tokens=max_new_tokens,
+                    min_new_tokens=200,
                     do_sample=True,
                     temperature=0.7,
                     top_p=0.9,
@@ -107,14 +135,59 @@ class GemmaBookSumProvider(SummarizationProvider):
                     pad_token_id=self._tokenizer.eos_token_id
                 )
             
-            # Extraer solo el texto generado (sin el prompt)
+            # Extraer el texto generado
             generated_text = self._tokenizer.decode(
                 outputs[0][inputs['input_ids'].shape[1]:], 
                 skip_special_tokens=True
             )
-            current_summary = generated_text.strip()
+            chunk_summary = generated_text.strip()
+            
+            # Guardar resumen del chunk
+            chunk_summaries.append({
+                'chunk_number': i + 1,
+                'text_preview': chunk[:200] + "..." if len(chunk) > 200 else chunk,
+                'summary': chunk_summary
+            })
+            
+            # Actualizar resumen acumulado
+            accumulated_summary = chunk_summary
         
-        return current_summary
+        # Crear resumen final con formato markdown detallado
+        final_summary = f"""# 📚 Summary Report
+
+## 📊 Processing Information
+- **Total Chunks Processed:** {len(chunks)}
+- **Original Text Length:** {len(text)} characters
+
+---
+
+## 🎯 Comprehensive Summary
+
+{accumulated_summary}
+
+---
+
+## 📝 Chunk-by-Chunk Breakdown
+
+"""
+        
+        for chunk_info in chunk_summaries:
+            final_summary += f"""
+### Chunk {chunk_info['chunk_number']} of {len(chunks)}
+
+**Text Preview:**
+```
+{chunk_info['text_preview']}
+```
+
+**Summary:**
+{chunk_info['summary']}
+
+---
+
+"""
+        
+        return final_summary
     
     def _split_text(self, text: str, chunk_size: int) -> list[str]:
         """Divide el texto en chunks preservando párrafos cuando es posible."""

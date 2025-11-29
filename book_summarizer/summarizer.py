@@ -45,11 +45,9 @@ def generate_summary_incremental(
     Si el provider tiene método iterativo (como GemmaBookSumProvider),
     usa esa implementación. Sino, usa la estrategia Refine tradicional.
     """
-    # Usar método iterativo si está disponible (específico para tu modelo)
     if hasattr(provider, 'summarize_iterative'):
         return provider.summarize_iterative(long_text, chunk_size)
     
-    # Fallback a estrategia tradicional
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     chunks = text_splitter.split_text(long_text)
     if not chunks:

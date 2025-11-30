@@ -37,7 +37,8 @@ def generate_summary_incremental(
     long_text: str,
     *,
     chunk_size: int = 4000,
-    chunk_overlap: int = 200
+    chunk_overlap: int = 200,
+    focus_instruction: str = None
 ) -> dict:
     """
     Genera un resumen usando una estrategia incremental optimizada.
@@ -47,7 +48,7 @@ def generate_summary_incremental(
     Devuelve un diccionario con 'summary' y 'chunks'.
     """
     if hasattr(provider, 'summarize_iterative'):
-        return provider.summarize_iterative(long_text, chunk_size)
+        return provider.summarize_iterative(long_text, chunk_size, focus_instruction=focus_instruction)
     
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     chunks = text_splitter.split_text(long_text)
@@ -56,7 +57,11 @@ def generate_summary_incremental(
 
     chunk_summaries = []
 
-    initial_prompt = f'Resume el siguiente texto de forma concisa y clara:\n\n"{chunks[0]}"'
+    base_instruction = "Resume el siguiente texto de forma concisa y clara"
+    if focus_instruction:
+        base_instruction += f" siguiendo esta instrucción: {focus_instruction}"
+    
+    initial_prompt = f'{base_instruction}:\n\n"{chunks[0]}"'
     running_summary = provider.summarize(initial_prompt, max_length=400, min_length=100)
     
     chunk_summaries.append({
@@ -74,6 +79,7 @@ def generate_summary_incremental(
         "{chunk}"
 
         Usando el nuevo fragmento, refina el resumen existente para que sea más completo y coherente.
+        {f'Instrucción de enfoque: {focus_instruction}' if focus_instruction else ''}
         """
         running_summary = provider.summarize(refine_prompt, max_length=500, min_length=200)
         

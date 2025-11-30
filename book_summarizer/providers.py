@@ -2,6 +2,8 @@ from abc import ABC, abstractmethod
 from typing import Optional
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from google import genai
+import os
 
 class SummarizationProvider(ABC):
     
@@ -15,6 +17,10 @@ class SummarizationProvider(ABC):
     def generate_title(self, text: str) -> str:
         """Genera un título para el texto. Por defecto usa las primeras palabras."""
         return " ".join(text.split()[:5]) + "..."
+    
+    def generate_tags(self, text: str) -> list[str]:
+        """Genera etiquetas para el texto. Por defecto devuelve lista vacía."""
+        return []
 
 class GemmaBookSumProvider(SummarizationProvider):
     _tokenizer = None
@@ -39,8 +45,14 @@ class GemmaBookSumProvider(SummarizationProvider):
                 device = "cpu"
                 GemmaBookSumProvider._model.to(device)
             
-    def summarize(self, text: str, max_length: int = 500, min_length: int = 50) -> str:
-        prompt = f"Resume el siguiente texto:\n\n{text}\n\nResumen:"
+    def summarize(self, text: str, max_length: int = 500, min_length: int = 50, focus_instruction: str = None) -> str:
+        base_instruction = "Resume el siguiente texto"
+        if focus_instruction:
+            base_instruction += f" siguiendo esta instrucción: {focus_instruction}"
+        else:
+            base_instruction += ":"
+            
+        prompt = f"{base_instruction}\n\n{text}\n\nResumen:"
         
         inputs = self._tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
         
@@ -62,7 +74,7 @@ class GemmaBookSumProvider(SummarizationProvider):
         
         return summary
     
-    def summarize_iterative(self, text: str, chunk_size: int = 4000, max_new_tokens: int = 1200, progress_callback=None) -> dict:
+    def summarize_iterative(self, text: str, chunk_size: int = 4000, max_new_tokens: int = 2048, progress_callback=None, focus_instruction: str = None) -> dict:
         """
         Procesa texto largo de forma iterativa usando el prompt específico del modelo.
         Cada chunk actualiza el resumen anterior de forma incremental.
@@ -70,8 +82,9 @@ class GemmaBookSumProvider(SummarizationProvider):
         Args:
             text: Texto a resumir
             chunk_size: Tamaño de cada chunk
-            max_new_tokens: Tokens máximos a generar por chunk (default: 1200 para resúmenes detallados)
+            max_new_tokens: Tokens máximos a generar por chunk (default: 2048 para resúmenes más detallados)
             progress_callback: Función opcional para reportar progreso (recibe current, total)
+            focus_instruction: Instrucción específica para el enfoque del resumen
         """
         # Dividir texto en chunks
         chunks = self._split_text(text, chunk_size)
@@ -80,12 +93,26 @@ class GemmaBookSumProvider(SummarizationProvider):
             return ""
         
         if len(chunks) == 1:
-            return self.summarize(text, max_length=1200)
+            return self.summarize(text, max_length=max_new_tokens, focus_instruction=focus_instruction)
         
         # Almacenar resúmenes parciales
         chunk_summaries = []
         accumulated_summary = ""
         
+        # Preparar instrucción de enfoque
+        focus_text = ""
+        if focus_instruction:
+            focus_text = f"\n\n**FOCUS INSTRUCTION:** {focus_instruction}\nEnsure the summary strictly adheres to this focus."
+        
+        # Instrucciones negativas para evitar meta-lenguaje
+        style_guidelines = """
+STYLE GUIDELINES:
+- Write DIRECTLY about the content (e.g., "The Mom Test is..." NOT "The text defines The Mom Test...").
+- Do NOT use meta-language like "The author discusses", "The chapter covers", "In this section".
+- Be specific and concrete. Avoid vague generalizations.
+- Capture actionable advice and key insights, not just topics.
+"""
+
         for i, chunk in enumerate(chunks):
             print(f"Procesando chunk {i+1}/{len(chunks)}...")
             
@@ -96,8 +123,11 @@ class GemmaBookSumProvider(SummarizationProvider):
             # Crear prompt según el chunk
             if i == 0:
                 # Primer chunk: resumen inicial detallado
-                prompt = f"""Summarize the following text in detail, capturing all key points, main ideas, and important details. Use markdown formatting with sections and bullet points:
+                prompt = f"""Summarize the following text in detail, capturing all key points, main ideas, and important details. Use markdown formatting with sections and bullet points.{focus_text}
 
+{style_guidelines}
+
+Text:
 {chunk}
 
 Detailed Summary:"""
@@ -110,10 +140,12 @@ Detailed Summary:"""
 {chunk}
 
 Provide an updated and expanded summary that:
-1. Incorporates all new information from the text above
-2. Maintains all important details from the current summary
-3. Uses markdown formatting with headers, bullet points, and sections
-4. Is comprehensive and detailed
+1. Incorporates all new information from the text above into the existing summary structure.
+2. Maintains ALL important details from the current summary (do not compress or remove information).
+3. Uses markdown formatting with headers, bullet points, and sections.
+4. Is comprehensive and detailed.{focus_text}
+
+{style_guidelines}
 
 Updated Summary:"""
             
@@ -162,6 +194,7 @@ Updated Summary:"""
 ## 📊 Processing Information
 - **Total Chunks Processed:** {len(chunks)}
 - **Original Text Length:** {len(text)} characters
+{f'- **Focus:** {focus_instruction}' if focus_instruction else ''}
 
 ---
 
@@ -245,3 +278,170 @@ Updated Summary:"""
             title = title[:47] + "..."
             
         return title
+        
+    def generate_tags(self, text: str) -> list[str]:
+        """Genera 3-5 etiquetas relevantes para el texto."""
+        preview_text = text[:2000]
+        prompt = f"Genera 3 a 5 etiquetas (palabras clave) separadas por comas para el siguiente texto:\n\n{preview_text}\n\nEtiquetas:"
+        
+        inputs = self._tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024)
+        
+        if torch.cuda.is_available():
+            inputs = {k: v.cuda() for k, v in inputs.items()}
+        
+        with torch.no_grad():
+            outputs = self._model.generate(
+                **inputs,
+                max_new_tokens=30,
+                min_new_tokens=5,
+                temperature=0.5,
+                do_sample=True,
+                pad_token_id=self._tokenizer.eos_token_id
+            )
+        
+        generated_text = self._tokenizer.decode(outputs[0], skip_special_tokens=True)
+        tags_text = generated_text.replace(prompt, "").strip()
+        
+        # Procesar etiquetas
+        tags = [tag.strip().strip('"').strip("'") for tag in tags_text.split(',')]
+        return tags[:5]
+
+class GeminiProvider(SummarizationProvider):
+    def __init__(self, api_key: str, model_name: str = "gemini-2.0-flash-exp"):
+        super().__init__(model_name)
+        self.client = genai.Client(api_key=api_key)
+        
+    def summarize(self, text: str, max_length: int = 2048, min_length: int = 50, focus_instruction: str = None) -> str:
+        base_instruction = "Resume el siguiente texto"
+        if focus_instruction:
+            base_instruction += f" siguiendo esta instrucción: {focus_instruction}"
+        
+        prompt = f"{base_instruction}:\n\n{text}"
+        
+        response = self.client.models.generate_content(
+            model=self.model_name,
+            contents=prompt,
+            config={
+                'max_output_tokens': max_length,
+                'temperature': 0.7,
+            }
+        )
+        
+        return response.text
+        
+    def summarize_iterative(self, text: str, chunk_size: int = 15000, max_new_tokens: int = 2048, progress_callback=None, focus_instruction: str = None) -> dict:
+        """
+        Implementación iterativa para Gemini.
+        Aunque Gemini tiene una ventana de contexto grande, mantenemos la estructura de chunks
+        para consistencia y para manejar libros extremadamente largos.
+        Aumentamos el chunk_size por defecto ya que Gemini soporta mucho más contexto.
+        """
+        # Dividir texto en chunks (usando un tamaño mucho mayor)
+        chunks = self._split_text(text, chunk_size)
+        
+        if not chunks:
+            return ""
+        
+        if len(chunks) == 1:
+            return self.summarize(text, max_length=max_new_tokens, focus_instruction=focus_instruction)
+        
+        chunk_summaries = []
+        accumulated_summary = ""
+        
+        focus_text = ""
+        if focus_instruction:
+            focus_text = f"\n\n**FOCUS INSTRUCTION:** {focus_instruction}"
+
+        style_guidelines = """
+STYLE GUIDELINES:
+- Write DIRECTLY about the content.
+- Do NOT use meta-language.
+- Be specific and concrete.
+"""
+        
+        for i, chunk in enumerate(chunks):
+            if progress_callback:
+                progress_callback(i + 1, len(chunks))
+                
+            if i == 0:
+                prompt = f"""Summarize the following text in detail.{focus_text}
+{style_guidelines}
+Text:
+{chunk}"""
+            else:
+                prompt = f"""## Current Summary:
+{accumulated_summary}
+
+## New Text Section:
+{chunk}
+
+Update and expand the summary.{focus_text}
+{style_guidelines}"""
+
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config={
+                    'max_output_tokens': max_new_tokens,
+                    'temperature': 0.7,
+                }
+            )
+            
+            chunk_summary = response.text
+            
+            chunk_summaries.append({
+                'chunk_number': i + 1,
+                'text_preview': chunk[:200] + "..." if len(chunk) > 200 else chunk,
+                'summary': chunk_summary
+            })
+            
+            accumulated_summary = chunk_summary
+            
+        final_summary = f"""# 📚 Summary Report
+
+## 📊 Processing Information
+- **Total Chunks:** {len(chunks)}
+- **Focus:** {focus_instruction or 'General'}
+
+---
+
+## 🎯 Comprehensive Summary
+
+{accumulated_summary}
+"""
+        return {
+            "summary": final_summary,
+            "chunks": chunk_summaries
+        }
+
+    def generate_title(self, text: str) -> str:
+        preview_text = text[:2000]
+        prompt = f"Genera un título muy corto (máximo 5 palabras) y descriptivo para el siguiente texto:\n\n{preview_text}\n\nTítulo:"
+        
+        response = self.client.models.generate_content(
+            model=self.model_name,
+            contents=prompt,
+            config={'max_output_tokens': 20}
+        )
+        
+        title = response.text.strip().strip('"').strip("'")
+        return title
+    
+    def generate_tags(self, text: str) -> list[str]:
+        preview_text = text[:2000]
+        prompt = f"Genera 3 a 5 etiquetas (palabras clave) separadas por comas para el siguiente texto:\n\n{preview_text}\n\nEtiquetas:"
+        
+        response = self.client.models.generate_content(
+            model=self.model_name,
+            contents=prompt,
+            config={'max_output_tokens': 30}
+        )
+        
+        tags_text = response.text.strip().strip('"').strip("'")
+        tags = [tag.strip() for tag in tags_text.split(',')]
+        return tags[:5]
+    
+    def _split_text(self, text: str, chunk_size: int) -> list[str]:
+        # Reutilizamos la lógica de split simple por ahora, o podríamos heredarla si moviéramos el método a la clase base
+        # Por simplicidad, copiamos la lógica básica o usamos una división simple ya que Gemini maneja bien el contexto
+        return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]

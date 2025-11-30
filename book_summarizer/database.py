@@ -40,6 +40,12 @@ class SummaryDatabase:
                 conn.execute("ALTER TABLE summaries ADD COLUMN title TEXT")
             except sqlite3.OperationalError:
                 pass
+            
+            # Intentar añadir columna tags si no existe
+            try:
+                conn.execute("ALTER TABLE summaries ADD COLUMN tags TEXT")
+            except sqlite3.OperationalError:
+                pass
                 
             conn.commit()
     
@@ -51,7 +57,8 @@ class SummaryDatabase:
                     processing_time: float, 
                     method: str = 'unknown',
                     chunks_data: str = None,
-                    title: str = None) -> int:
+                    title: str = None,
+                    tags: str = None) -> int:
         """Guarda un resumen en la base de datos."""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
@@ -62,9 +69,9 @@ class SummaryDatabase:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute("""
                 INSERT INTO summaries 
-                (timestamp, original_text, summary, word_count, char_count, processing_time, method, chunks_data, title)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (timestamp, original_text, summary, word_count, char_count, processing_time, method, chunks_data, title))
+                (timestamp, original_text, summary, word_count, char_count, processing_time, method, chunks_data, title, tags)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (timestamp, original_text, summary, word_count, char_count, processing_time, method, chunks_data, title, tags))
             return cursor.lastrowid
     
     def get_recent_summaries(self, limit: int = 10) -> List[Dict]:
@@ -79,15 +86,34 @@ class SummaryDatabase:
             return [dict(row) for row in cursor.fetchall()]
     
     def search_summaries(self, query: str, limit: int = 20) -> List[Dict]:
-        """Busca resúmenes que contengan el texto especificado."""
+        """
+        Busca resúmenes que contengan los términos especificados.
+        Busca en título, texto original, resumen y tags.
+        """
+        terms = query.strip().split()
+        if not terms:
+            return []
+            
+        conditions = []
+        params = []
+        
+        for term in terms:
+            # Cada término debe estar presente en al menos uno de los campos
+            conditions.append("(title LIKE ? OR original_text LIKE ? OR summary LIKE ? OR tags LIKE ?)")
+            like_term = f"%{term}%"
+            params.extend([like_term, like_term, like_term, like_term])
+            
+        where_clause = " AND ".join(conditions)
+        params.append(limit)
+        
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
-            cursor = conn.execute("""
+            cursor = conn.execute(f"""
                 SELECT * FROM summaries 
-                WHERE original_text LIKE ? OR summary LIKE ?
+                WHERE {where_clause}
                 ORDER BY created_at DESC 
                 LIMIT ?
-            """, (f"%{query}%", f"%{query}%", limit))
+            """, params)
             return [dict(row) for row in cursor.fetchall()]
     
     def get_summary_by_id(self, summary_id: int) -> Optional[Dict]:
@@ -138,6 +164,53 @@ class SummaryDatabase:
             """, (keep_last,))
             conn.commit()
     
+    def get_all_tags(self) -> List[str]:
+        """Obtiene todas las etiquetas únicas usadas en los resúmenes."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT tags FROM summaries WHERE tags IS NOT NULL AND tags != ''")
+            all_tags = set()
+            for row in cursor:
+                tags_str = row[0]
+                if tags_str:
+                    # Separar por comas y limpiar espacios
+                    tags = [t.strip() for t in tags_str.split(',')]
+                    all_tags.update(tags)
+            return sorted(list(all_tags))
+
+    def filter_summaries(self, query: str = None, tags: List[str] = None, limit: int = 50) -> List[Dict]:
+        """
+        Filtra resúmenes por texto y/o etiquetas.
+        """
+        conditions = []
+        params = []
+        
+        # Filtro de texto
+        if query:
+            terms = query.strip().split()
+            for term in terms:
+                conditions.append("(title LIKE ? OR original_text LIKE ? OR summary LIKE ? OR tags LIKE ?)")
+                like_term = f"%{term}%"
+                params.extend([like_term, like_term, like_term, like_term])
+        
+        # Filtro de etiquetas (AND logic: debe tener TODAS las etiquetas seleccionadas)
+        if tags:
+            for tag in tags:
+                conditions.append("tags LIKE ?")
+                params.append(f"%{tag}%")
+        
+        where_clause = " AND ".join(conditions) if conditions else "1=1"
+        params.append(limit)
+        
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(f"""
+                SELECT * FROM summaries 
+                WHERE {where_clause}
+                ORDER BY created_at DESC 
+                LIMIT ?
+            """, params)
+            return [dict(row) for row in cursor.fetchall()]
+
     def export_to_csv(self, filepath: str):
         """Exporta todos los resúmenes a un archivo CSV."""
         import csv

@@ -3,7 +3,7 @@ import time
 import json
 from datetime import datetime
 from book_summarizer import file_processor
-from book_summarizer.providers import GemmaBookSumProvider
+from book_summarizer.providers import GemmaBookSumProvider, GeminiProvider
 from book_summarizer.summarizer import generate_summary_incremental
 from book_summarizer.database import SummaryDatabase
 
@@ -14,7 +14,11 @@ st.set_page_config(
 )
 
 @st.cache_resource
-def get_provider():
+def get_provider(provider_type="Gemma (Local)", api_key=None):
+    if provider_type == "Gemini 3 Pro (Cloud)":
+        if not api_key:
+            return None
+        return GeminiProvider(api_key=api_key)
     return GemmaBookSumProvider()
 
 @st.cache_resource
@@ -28,6 +32,10 @@ def show_summary_details(item):
     st.write(f"**Fecha:** {item['timestamp']}")
     st.write(f"**Método:** {item['method']}")
     st.write(f"**Palabras:** {item['word_count']}")
+    
+    if item.get('tags'):
+        tags = item['tags'].split(',')
+        st.markdown("**Etiquetas:** " + " ".join([f"`{tag.strip()}`" for tag in tags]))
 
     col1, col2 = st.columns(2)
     with col1:
@@ -72,9 +80,40 @@ def render_sidebar():
     
     method = st.sidebar.radio(
         "Método de procesamiento:",
-        ("Iterativo (Recomendado)", "Estándar"),
-        help="Iterativo: Procesa por chunks usando el prompt específico del modelo. Estándar: Método tradicional."
+        ("Iterativo", "Map Reduce"),
     )
+    
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🤖 Modelo")
+    
+    provider_type = st.sidebar.selectbox(
+        "Selecciona el modelo:",
+        ("Gemma (Local)", "Gemini 3 Pro (Cloud)")
+    )
+    
+    api_key = None
+    if provider_type == "Gemini 3 Pro (Cloud)":
+        api_key = st.sidebar.text_input("API Key de Google:", type="password", value="AIzaSyB9VHCoeUGe2cutPo6v4QQHNtBWNYirw3w")
+        if not api_key:
+            st.sidebar.warning("⚠️ Ingresa tu API Key para usar Gemini.")
+    
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🎯 Enfoque del Resumen")
+    
+    focus_option = st.sidebar.selectbox(
+        "Tipo de resumen:",
+        ("General (Por defecto)", "Personajes y Relaciones", "Conceptos Clave", "Lecciones Prácticas", "Personalizado")
+    )
+    
+    focus_instruction = None
+    if focus_option == "Personajes y Relaciones":
+        focus_instruction = "Céntrate en identificar los personajes principales, sus características y la evolución de sus relaciones."
+    elif focus_option == "Conceptos Clave":
+        focus_instruction = "Identifica y define los conceptos clave, términos técnicos y definiciones importantes."
+    elif focus_option == "Lecciones Prácticas":
+        focus_instruction = "Extrae las lecciones prácticas, consejos aplicables y puntos de acción principales."
+    elif focus_option == "Personalizado":
+        focus_instruction = st.sidebar.text_area("Instrucción personalizada:", placeholder="Ej: Resume como si fueras un pirata...")
     
     # Botón para limpiar cache si hay problemas
     if st.sidebar.button("🔄 Reiniciar Modelo", help="Limpia el cache y recarga el modelo"):
@@ -114,6 +153,10 @@ def render_sidebar():
                 
             if st.sidebar.button(label, key=f"btn_summary_{item['id']}", use_container_width=True, help=f"{item.get('title', '')}\n{item['timestamp']}"):
                 show_summary_details(item)
+            
+            if item.get('tags'):
+                st.sidebar.caption(" ".join([f"#{tag.strip()}" for tag in item['tags'].split(',')[:3]]))
+                st.sidebar.markdown("---")
     else:
         if search_query:
             st.sidebar.info("No se encontraron resultados")
@@ -129,31 +172,28 @@ def render_sidebar():
         st.sidebar.metric("Palabras procesadas", f"{stats['total_words']:,}")
         st.sidebar.metric("Tiempo promedio", f"{stats['avg_processing_time']:.1f}s")
     
-    return method
+    return method, focus_instruction, provider_type, api_key
 def get_text_input() -> str:
-    st.header("1. Ingresa el Texto")
-    input_method = st.radio("Método de entrada:", ("Pegar texto", "Subir archivo"))
+    st.header("1. Sube el Archivo")
     
     text = ""
-    if input_method == "Pegar texto":
-        text = st.text_area("Pega el texto a resumir aquí:", height=250, label_visibility="collapsed")
-    else:
-        uploaded_file = st.file_uploader(
-            "Sube un archivo (.txt, .pdf, .docx, .epub)",
-            type=["txt", "pdf", "docx", "epub"],
-            label_visibility="collapsed"
-        )
-        if uploaded_file:
-            with st.spinner(f"Procesando archivo '{uploaded_file.name}'..."):
-                file_extension = uploaded_file.name.split('.')[-1].lower()
-                text_extractors = {
-                    "txt": file_processor.get_text_from_txt,
-                    "pdf": file_processor.get_text_from_pdf,
-                    "docx": file_processor.get_text_from_docx,
-                    "epub": file_processor.get_text_from_epub,
-                }
-                if file_extension in text_extractors:
-                    text = text_extractors[file_extension](uploaded_file)
+    uploaded_file = st.file_uploader(
+        "Sube un archivo (.txt, .pdf, .docx, .epub)",
+        type=["txt", "pdf", "docx", "epub"],
+        label_visibility="visible"
+    )
+    
+    if uploaded_file:
+        with st.spinner(f"Procesando archivo '{uploaded_file.name}'..."):
+            file_extension = uploaded_file.name.split('.')[-1].lower()
+            text_extractors = {
+                "txt": file_processor.get_text_from_txt,
+                "pdf": file_processor.get_text_from_pdf,
+                "docx": file_processor.get_text_from_docx,
+                "epub": file_processor.get_text_from_epub,
+            }
+            if file_extension in text_extractors:
+                text = text_extractors[file_extension](uploaded_file)
     return text
 
 def main():
@@ -167,54 +207,84 @@ def main():
     if "text_stats" not in st.session_state:
         st.session_state.text_stats = {}
 
-    method = render_sidebar()
-    user_text = get_text_input()
-
-    # Calcular estadísticas del texto
-    if user_text:
-        st.session_state.text_stats = {
-            "words": len(user_text.split()),
-            "chars": len(user_text),
-            "lines": len(user_text.split('\n'))
-        }
-
-    st.header("2. Genera el Resumen")
-    if st.button("Generar Resumen", type="primary"):
-        if not user_text.strip():
-            st.warning("Por favor, ingresa texto o sube un archivo.")
-            return
-        
-        try:
-            start_time = time.time()
+    method, focus_instruction, provider_type, api_key = render_sidebar()
+    
+    tab1, tab2 = st.tabs(["✨ Generar Resumen", "📚 Biblioteca"])
+    
+    with tab1:
+        user_text = get_text_input()
+    
+        # Calcular estadísticas del texto
+        if user_text:
+            st.session_state.text_stats = {
+                "words": len(user_text.split()),
+                "chars": len(user_text),
+                "lines": len(user_text.split('\n'))
+            }
+    
+        st.header("2. Genera el Resumen")
+        if st.button("Generar Resumen", type="primary"):
+            if not user_text.strip():
+                st.warning("Por favor, ingresa texto o sube un archivo.")
+                return
             
-            # Crear placeholder para la barra de progreso
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            provider = get_provider()
-            
-            if method == "Iterativo (Recomendado)":
-                if hasattr(provider, 'summarize_iterative'):
-                    # Calcular chunks para estimar progreso
-                    chunk_size = 4000
-                    estimated_chunks = max(1, len(user_text) // chunk_size + (1 if len(user_text) % chunk_size else 0))
-                    
-                    status_text.info(f"📊 Procesando texto en ~{estimated_chunks} chunks. Tiempo estimado: ~{estimated_chunks * 15}s")
-                    progress_bar.progress(5)
-                    
-                    # Función callback para actualizar progreso
-                    def update_progress(current, total):
-                        progress_percent = int((current / total) * 85) + 10  # 10-95%
-                        progress_bar.progress(progress_percent)
-                        status_text.info(f"🔄 Procesando chunk {current}/{total}... ({progress_percent}%)")
-                    
-                    # Intentar usar progress_callback si está disponible
-                    try:
-                        result = provider.summarize_iterative(user_text, chunk_size=chunk_size, progress_callback=update_progress)
-                    except TypeError:
-                        # Versión antigua sin progress_callback - usar sin callback
-                        st.warning("⚠️ Modelo en versión antigua. Presiona '🔄 Reiniciar Modelo' para actualizar y ver progreso en tiempo real.")
-                        result = provider.summarize_iterative(user_text, chunk_size=chunk_size)
+            try:
+                start_time = time.time()
+                
+                # Crear placeholder para la barra de progreso
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                provider = get_provider(provider_type, api_key)
+                
+                if not provider:
+                    st.error("❌ Error: No se pudo inicializar el proveedor. Verifica la API Key.")
+                    progress_bar.empty()
+                    status_text.empty()
+                    return
+                
+                if method == "Iterativo":
+                    if hasattr(provider, 'summarize_iterative'):
+                        # Calcular chunks para estimar progreso
+                        # Usar chunks mucho más grandes para Gemini (50k caracteres) vs Gemma (4k)
+                        chunk_size = 50000 if provider_type == "Gemini 3 Pro (Cloud)" else 4000
+                        estimated_chunks = max(1, len(user_text) // chunk_size + (1 if len(user_text) % chunk_size else 0))
+                        
+                        status_text.info(f"📊 Procesando texto en ~{estimated_chunks} chunks. Tiempo estimado: ~{estimated_chunks * 15}s")
+                        progress_bar.progress(5)
+                        
+                        # Función callback para actualizar progreso
+                        def update_progress(current, total):
+                            progress_percent = int((current / total) * 85) + 10  # 10-95%
+                            progress_bar.progress(progress_percent)
+                            status_text.info(f"🔄 Procesando chunk {current}/{total}... ({progress_percent}%)")
+                        
+                        # Intentar usar progress_callback si está disponible
+                        try:
+                            result = provider.summarize_iterative(user_text, chunk_size=chunk_size, progress_callback=update_progress, focus_instruction=focus_instruction)
+                        except TypeError:
+                            # Versión antigua sin progress_callback - usar sin callback
+                            st.warning("⚠️ Modelo en versión antigua. Presiona '🔄 Reiniciar Modelo' para actualizar y ver progreso en tiempo real.")
+                            result = provider.summarize_iterative(user_text, chunk_size=chunk_size, focus_instruction=focus_instruction)
+                        
+                        if isinstance(result, dict):
+                            summary = result['summary']
+                            chunks = result.get('chunks', [])
+                        else:
+                            summary = result
+                            chunks = []
+                        
+                        progress_bar.progress(95)
+                        status_text.info("✨ Finalizando resumen...")
+                    else:
+                        st.error("El método iterativo no está disponible. Presiona 🔄 Reiniciar Modelo en el sidebar.")
+                        progress_bar.empty()
+                        status_text.empty()
+                        return
+                else:
+                    status_text.info("🔄 Procesando con método Map-Reduce...")
+                    progress_bar.progress(20)
+                    result = generate_summary_incremental(provider, user_text, focus_instruction=focus_instruction)
                     
                     if isinstance(result, dict):
                         summary = result['summary']
@@ -222,74 +292,67 @@ def main():
                     else:
                         summary = result
                         chunks = []
-                    
-                    progress_bar.progress(95)
-                    status_text.info("✨ Finalizando resumen...")
-                else:
-                    st.error("El método iterativo no está disponible. Presiona 🔄 Reiniciar Modelo en el sidebar.")
-                    progress_bar.empty()
-                    status_text.empty()
-                    return
-            else:
-                status_text.info("🔄 Procesando con método estándar...")
-                progress_bar.progress(20)
-                result = generate_summary_incremental(provider, user_text)
+                        
+                    progress_bar.progress(90)
                 
-                if isinstance(result, dict):
-                    summary = result['summary']
-                    chunks = result.get('chunks', [])
-                else:
-                    summary = result
-                    chunks = []
-                    
-                progress_bar.progress(90)
-            
-            # Completar progreso
-            progress_bar.progress(98)
-            status_text.info("🏷️ Generando título...")
-            
-            # Generar título
-            try:
-                title = provider.generate_title(user_text)
-            except Exception:
-                title = f"Resumen {datetime.now().strftime('%H:%M')}"
-            
-            progress_bar.progress(100)
-            status_text.success("✅ ¡Resumen completado!")
-            time.sleep(0.5)  # Breve pausa para mostrar el 100%
-            
-            # Limpiar indicadores
-            progress_bar.empty()
-            status_text.empty()
-            
-            processing_time = time.time() - start_time
-            st.session_state.text_stats["processing_time"] = processing_time
-            st.session_state.summary = summary
-            st.session_state.chunks = chunks
-            
-            # Guardar en base de datos SQLite
-            db = get_database()
-            summary_id = db.save_summary(
-                original_text=user_text,
-                summary=summary,
-                word_count=st.session_state.text_stats.get('words', 0),
-                char_count=st.session_state.text_stats.get('chars', 0),
-                processing_time=processing_time,
-                method=method,
-                chunks_data=json.dumps(chunks) if chunks else None,
-                title=title
-            )
-            
-            # Limpiar resúmenes antiguos (mantener últimos 100)
-            db.cleanup_old_summaries(keep_last=100)
+                # Completar progreso
+                progress_bar.progress(98)
+                status_text.info("🏷️ Generando título...")
                 
-        except Exception as e:
-            st.error(f"Ocurrió un error: {e}")
-            st.exception(e)
+                try:
+                    title = provider.generate_title(user_text)
+                except Exception:
+                    title = f"Resumen {datetime.now().strftime('%H:%M')}"
+                
+                status_text.info("🏷️ Generando etiquetas...")
+                try:
+                    tags_list = provider.generate_tags(user_text)
+                    tags = ",".join(tags_list)
+                except Exception:
+                    tags = ""
+                
+                progress_bar.progress(100)
+                status_text.success("✅ ¡Resumen completado!")
+                time.sleep(0.5)  # Breve pausa para mostrar el 100%
+                
+                # Limpiar indicadores
+                progress_bar.empty()
+                status_text.empty()
+                
+                processing_time = time.time() - start_time
+                st.session_state.text_stats["processing_time"] = processing_time
+                st.session_state.summary = summary
+                st.session_state.chunks = chunks
+                st.session_state.summary_tags = tags
+                
+                # Guardar en base de datos SQLite
+                db = get_database()
+                summary_id = db.save_summary(
+                    original_text=user_text,
+                    summary=summary,
+                    word_count=st.session_state.text_stats.get('words', 0),
+                    char_count=st.session_state.text_stats.get('chars', 0),
+                    processing_time=processing_time,
+                    method=method,
+                    chunks_data=json.dumps(chunks) if chunks else None,
+                    title=title,
+                    tags=tags
+                )
+                
+                
+                # Limpiar resúmenes antiguos (mantener últimos 100)
+                db.cleanup_old_summaries(keep_last=100)
+                    
+            except Exception as e:
+                st.error(f"Ocurrió un error: {e}")
+                st.exception(e)
 
     if st.session_state.summary:
         st.header("✅ Resumen Generado")
         
+        if st.session_state.get('tags'):
+             st.markdown(" ".join([f"`{tag.strip()}`" for tag in st.session_state.summary_tags.split(',')]))
+
         # Mostrar el resumen con formato markdown nativo
         st.markdown(st.session_state.summary)
         
@@ -361,6 +424,36 @@ def main():
 
             stats_text = f"📝 <strong>{st.session_state.text_stats.get('words', 0)}</strong> palabras originales | 📄 <strong>{summary_words}</strong> palabras resumen | ⏱️ <strong>{processing_time:.1f}s</strong> procesamiento"
             st.markdown(f"<div style='text-align: center; color: #666; font-size: 0.9em; margin: 10px 0;'>{stats_text}</div>", unsafe_allow_html=True)
+
+    with tab2:
+        st.header("📚 Biblioteca de Resúmenes")
+        
+        db = get_database()
+        all_tags = db.get_all_tags()
+        
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            search_query = st.text_input("🔍 Buscar:", placeholder="Título, contenido o tags...")
+        with col2:
+            selected_tags = st.multiselect("🏷️ Filtrar por etiquetas:", all_tags)
+            
+        results = db.filter_summaries(query=search_query, tags=selected_tags, limit=20)
+        
+        if results:
+            st.caption(f"Se encontraron {len(results)} resúmenes")
+            for item in results:
+                with st.container(border=True):
+                    col_a, col_b = st.columns([3, 1])
+                    with col_a:
+                        st.subheader(item.get('title', 'Sin título'))
+                        st.caption(f"📅 {item['timestamp']} | ⏱️ {item['processing_time']:.1f}s | 📝 {item['word_count']} palabras")
+                        if item.get('tags'):
+                            st.markdown(" ".join([f"`{tag.strip()}`" for tag in item['tags'].split(',')[:5]]))
+                    with col_b:
+                        if st.button("Ver Detalles", key=f"lib_btn_{item['id']}", use_container_width=True):
+                            show_summary_details(item)
+        else:
+            st.info("No se encontraron resúmenes que coincidan con tu búsqueda.")
 
 if __name__ == "__main__":
     main()

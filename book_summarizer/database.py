@@ -28,6 +28,19 @@ class SummaryDatabase:
             # Crear índices para búsquedas rápidas
             conn.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON summaries(timestamp)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_method ON summaries(method)")
+            
+            # Intentar añadir columna chunks_data si no existe (migración simple)
+            try:
+                conn.execute("ALTER TABLE summaries ADD COLUMN chunks_data TEXT")
+            except sqlite3.OperationalError:
+                pass
+            
+            # Intentar añadir columna title si no existe
+            try:
+                conn.execute("ALTER TABLE summaries ADD COLUMN title TEXT")
+            except sqlite3.OperationalError:
+                pass
+                
             conn.commit()
     
     def save_summary(self, 
@@ -36,16 +49,22 @@ class SummaryDatabase:
                     word_count: int, 
                     char_count: int, 
                     processing_time: float, 
-                    method: str = 'unknown') -> int:
+                    method: str = 'unknown',
+                    chunks_data: str = None,
+                    title: str = None) -> int:
         """Guarda un resumen en la base de datos."""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Si no hay título, usar timestamp como fallback
+        if not title:
+            title = f"Resumen {timestamp}"
         
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute("""
                 INSERT INTO summaries 
-                (timestamp, original_text, summary, word_count, char_count, processing_time, method)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (timestamp, original_text, summary, word_count, char_count, processing_time, method))
+                (timestamp, original_text, summary, word_count, char_count, processing_time, method, chunks_data, title)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (timestamp, original_text, summary, word_count, char_count, processing_time, method, chunks_data, title))
             return cursor.lastrowid
     
     def get_recent_summaries(self, limit: int = 10) -> List[Dict]:

@@ -38,12 +38,13 @@ def generate_summary_incremental(
     *,
     chunk_size: int = 4000,
     chunk_overlap: int = 200
-) -> str:
+) -> dict:
     """
     Genera un resumen usando una estrategia incremental optimizada.
     
     Si el provider tiene método iterativo (como GemmaBookSumProvider),
     usa esa implementación. Sino, usa la estrategia Refine tradicional.
+    Devuelve un diccionario con 'summary' y 'chunks'.
     """
     if hasattr(provider, 'summarize_iterative'):
         return provider.summarize_iterative(long_text, chunk_size)
@@ -51,10 +52,18 @@ def generate_summary_incremental(
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     chunks = text_splitter.split_text(long_text)
     if not chunks:
-        return ""
+        return {"summary": "", "chunks": []}
+
+    chunk_summaries = []
 
     initial_prompt = f'Resume el siguiente texto de forma concisa y clara:\n\n"{chunks[0]}"'
     running_summary = provider.summarize(initial_prompt, max_length=400, min_length=100)
+    
+    chunk_summaries.append({
+        'chunk_number': 1,
+        'text_preview': chunks[0][:200] + "..." if len(chunks[0]) > 200 else chunks[0],
+        'summary': running_summary
+    })
     
     for i, chunk in enumerate(chunks[1:]):
         refine_prompt = f"""
@@ -67,5 +76,14 @@ def generate_summary_incremental(
         Usando el nuevo fragmento, refina el resumen existente para que sea más completo y coherente.
         """
         running_summary = provider.summarize(refine_prompt, max_length=500, min_length=200)
+        
+        chunk_summaries.append({
+            'chunk_number': i + 2,
+            'text_preview': chunk[:200] + "..." if len(chunk) > 200 else chunk,
+            'summary': running_summary
+        })
 
-    return running_summary
+    return {
+        "summary": running_summary,
+        "chunks": chunk_summaries
+    }

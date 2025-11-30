@@ -12,6 +12,10 @@ class SummarizationProvider(ABC):
     def summarize(self, text: str, max_length: int = 500, min_length: int = 50) -> str:
         pass
 
+    def generate_title(self, text: str) -> str:
+        """Genera un título para el texto. Por defecto usa las primeras palabras."""
+        return " ".join(text.split()[:5]) + "..."
+
 class GemmaBookSumProvider(SummarizationProvider):
     _tokenizer = None
     _model = None
@@ -58,7 +62,7 @@ class GemmaBookSumProvider(SummarizationProvider):
         
         return summary
     
-    def summarize_iterative(self, text: str, chunk_size: int = 4000, max_new_tokens: int = 1200, progress_callback=None) -> str:
+    def summarize_iterative(self, text: str, chunk_size: int = 4000, max_new_tokens: int = 1200, progress_callback=None) -> dict:
         """
         Procesa texto largo de forma iterativa usando el prompt específico del modelo.
         Cada chunk actualiza el resumen anterior de forma incremental.
@@ -152,7 +156,7 @@ Updated Summary:"""
             # Actualizar resumen acumulado
             accumulated_summary = chunk_summary
         
-        # Crear resumen final con formato markdown detallado
+        # Crear resumen final limpio
         final_summary = f"""# 📚 Summary Report
 
 ## 📊 Processing Information
@@ -164,30 +168,12 @@ Updated Summary:"""
 ## 🎯 Comprehensive Summary
 
 {accumulated_summary}
-
----
-
-## 📝 Chunk-by-Chunk Breakdown
-
 """
         
-        for chunk_info in chunk_summaries:
-            final_summary += f"""
-### Chunk {chunk_info['chunk_number']} of {len(chunks)}
-
-**Text Preview:**
-```
-{chunk_info['text_preview']}
-```
-
-**Summary:**
-{chunk_info['summary']}
-
----
-
-"""
-        
-        return final_summary
+        return {
+            "summary": final_summary,
+            "chunks": chunk_summaries
+        }
     
     def _split_text(self, text: str, chunk_size: int) -> list[str]:
         """Divide el texto en chunks preservando párrafos cuando es posible."""
@@ -228,3 +214,34 @@ Updated Summary:"""
             chunks.append(current_chunk)
         
         return chunks
+
+    def generate_title(self, text: str) -> str:
+        """Genera un título corto y descriptivo para el texto."""
+        # Usar solo el inicio del texto para generar el título
+        preview_text = text[:1000]
+        prompt = f"Genera un título muy corto (máximo 5 palabras) y descriptivo para el siguiente texto:\n\n{preview_text}\n\nTítulo:"
+        
+        inputs = self._tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024)
+        
+        if torch.cuda.is_available():
+            inputs = {k: v.cuda() for k, v in inputs.items()}
+        
+        with torch.no_grad():
+            outputs = self._model.generate(
+                **inputs,
+                max_new_tokens=20,
+                min_new_tokens=2,
+                temperature=0.7,
+                do_sample=True,
+                pad_token_id=self._tokenizer.eos_token_id
+            )
+        
+        generated_text = self._tokenizer.decode(outputs[0], skip_special_tokens=True)
+        title = generated_text.replace(prompt, "").strip()
+        
+        # Limpieza básica del título
+        title = title.split('\n')[0].strip('"').strip("'")
+        if len(title) > 50:
+            title = title[:47] + "..."
+            
+        return title

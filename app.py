@@ -1,5 +1,6 @@
 import streamlit as st
 import time
+import json
 from datetime import datetime
 from book_summarizer import file_processor
 from book_summarizer.providers import GemmaBookSumProvider
@@ -23,6 +24,7 @@ def get_database():
 
 @st.dialog("Detalles del Resumen", width="large")
 def show_summary_details(item):
+    st.subheader(item.get('title', 'Resumen sin título'))
     st.write(f"**Fecha:** {item['timestamp']}")
     st.write(f"**Método:** {item['method']}")
     st.write(f"**Palabras:** {item['word_count']}")
@@ -50,12 +52,23 @@ def show_summary_details(item):
     with st.expander("📄 Ver Resumen Generado", expanded=True):
         st.markdown(item['summary'])
         
+    if item.get('chunks_data'):
+        try:
+            chunks = json.loads(item['chunks_data'])
+            with st.expander("🧩 Ver Desglose por Chunks", expanded=False):
+                for chunk in chunks:
+                    st.markdown(f"### Chunk {chunk['chunk_number']}")
+                    st.markdown(f"**Preview:** `{chunk['text_preview']}`")
+                    st.markdown(chunk['summary'])
+                    st.markdown("---")
+        except:
+            pass
+        
     with st.expander("📝 Ver Texto Original", expanded=False):
         st.markdown(item['original_text'])
 
 def render_sidebar():
     st.sidebar.title("⚙️ Configuración")
-    st.sidebar.info("Usando modelo: croko22/gemma-booksum-lora-v1")
     
     method = st.sidebar.radio(
         "Método de procesamiento:",
@@ -94,9 +107,12 @@ def render_sidebar():
     
     if recent_summaries:
         for item in recent_summaries:
-            # Formato corto de fecha: DD/MM HH:MM
-            short_date = item['timestamp'][8:16].replace(' ', ' ')
-            if st.sidebar.button(f"#{item['id']} | {short_date}", key=f"btn_summary_{item['id']}", use_container_width=True):
+            # Usar título si existe, sino fecha
+            label = item.get('title') or f"#{item['id']} | {item['timestamp'][8:16]}"
+            if len(label) > 30:
+                label = label[:27] + "..."
+                
+            if st.sidebar.button(label, key=f"btn_summary_{item['id']}", use_container_width=True, help=f"{item.get('title', '')}\n{item['timestamp']}"):
                 show_summary_details(item)
     else:
         if search_query:
@@ -114,7 +130,6 @@ def render_sidebar():
         st.sidebar.metric("Tiempo promedio", f"{stats['avg_processing_time']:.1f}s")
     
     return method
-
 def get_text_input() -> str:
     st.header("1. Ingresa el Texto")
     input_method = st.radio("Método de entrada:", ("Pegar texto", "Subir archivo"))
@@ -147,6 +162,8 @@ def main():
     # Inicializar estados de sesión
     if "summary" not in st.session_state:
         st.session_state.summary = ""
+    if "chunks" not in st.session_state:
+        st.session_state.chunks = []
     if "text_stats" not in st.session_state:
         st.session_state.text_stats = {}
 
@@ -193,11 +210,18 @@ def main():
                     
                     # Intentar usar progress_callback si está disponible
                     try:
-                        summary = provider.summarize_iterative(user_text, chunk_size=chunk_size, progress_callback=update_progress)
+                        result = provider.summarize_iterative(user_text, chunk_size=chunk_size, progress_callback=update_progress)
                     except TypeError:
                         # Versión antigua sin progress_callback - usar sin callback
                         st.warning("⚠️ Modelo en versión antigua. Presiona '🔄 Reiniciar Modelo' para actualizar y ver progreso en tiempo real.")
-                        summary = provider.summarize_iterative(user_text, chunk_size=chunk_size)
+                        result = provider.summarize_iterative(user_text, chunk_size=chunk_size)
+                    
+                    if isinstance(result, dict):
+                        summary = result['summary']
+                        chunks = result.get('chunks', [])
+                    else:
+                        summary = result
+                        chunks = []
                     
                     progress_bar.progress(95)
                     status_text.info("✨ Finalizando resumen...")
@@ -209,10 +233,27 @@ def main():
             else:
                 status_text.info("🔄 Procesando con método estándar...")
                 progress_bar.progress(20)
-                summary = generate_summary_incremental(provider, user_text)
+                result = generate_summary_incremental(provider, user_text)
+                
+                if isinstance(result, dict):
+                    summary = result['summary']
+                    chunks = result.get('chunks', [])
+                else:
+                    summary = result
+                    chunks = []
+                    
                 progress_bar.progress(90)
             
             # Completar progreso
+            progress_bar.progress(98)
+            status_text.info("🏷️ Generando título...")
+            
+            # Generar título
+            try:
+                title = provider.generate_title(user_text)
+            except Exception:
+                title = f"Resumen {datetime.now().strftime('%H:%M')}"
+            
             progress_bar.progress(100)
             status_text.success("✅ ¡Resumen completado!")
             time.sleep(0.5)  # Breve pausa para mostrar el 100%
@@ -224,6 +265,7 @@ def main():
             processing_time = time.time() - start_time
             st.session_state.text_stats["processing_time"] = processing_time
             st.session_state.summary = summary
+            st.session_state.chunks = chunks
             
             # Guardar en base de datos SQLite
             db = get_database()
@@ -233,7 +275,9 @@ def main():
                 word_count=st.session_state.text_stats.get('words', 0),
                 char_count=st.session_state.text_stats.get('chars', 0),
                 processing_time=processing_time,
-                method=method
+                method=method,
+                chunks_data=json.dumps(chunks) if chunks else None,
+                title=title
             )
             
             # Limpiar resúmenes antiguos (mantener últimos 100)
@@ -248,6 +292,14 @@ def main():
         
         # Mostrar el resumen con formato markdown nativo
         st.markdown(st.session_state.summary)
+        
+        if st.session_state.get('chunks'):
+            with st.expander("🧩 Ver Desglose por Chunks", expanded=False):
+                for chunk in st.session_state.chunks:
+                    st.markdown(f"### Chunk {chunk['chunk_number']}")
+                    st.markdown(f"**Preview:** `{chunk['text_preview']}`")
+                    st.markdown(chunk['summary'])
+                    st.markdown("---")
         
         # Opciones de descarga y copia
         col1, col2, col3 = st.columns(3)
@@ -278,6 +330,7 @@ def main():
             # Botón para limpiar
             if st.button("Limpiar", icon=":material/clear_all:", help="Limpiar el resumen actual"):
                 st.session_state.summary = ""
+                st.session_state.chunks = []
                 st.rerun()
         
         # Botón para exportar historial completo

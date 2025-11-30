@@ -25,6 +25,19 @@ def get_provider(provider_type="Gemma (Local)", api_key=None):
 def get_database():
     return SummaryDatabase()
 
+def render_tags(tags_str):
+    """Renderiza etiquetas usando badges nativos de Streamlit."""
+    if not tags_str:
+        return ""
+    
+    tags = [t.strip() for t in tags_str.split(',') if t.strip()]
+    
+    # Usar sintaxis de badge nativa de Streamlit
+    # Alternar colores o usar uno neutro
+    badges = [f":gray-badge[{tag}]" for tag in tags]
+    
+    return " ".join(badges)
+
 
 @st.dialog("Detalles del Resumen", width="large")
 def show_summary_details(item):
@@ -34,8 +47,7 @@ def show_summary_details(item):
     st.write(f"**Palabras:** {item['word_count']}")
     
     if item.get('tags'):
-        tags = item['tags'].split(',')
-        st.markdown("**Etiquetas:** " + " ".join([f"`{tag.strip()}`" for tag in tags]))
+        st.markdown(render_tags(item['tags']))
 
     col1, col2 = st.columns(2)
     with col1:
@@ -93,9 +105,13 @@ def render_sidebar():
     
     api_key = None
     if provider_type == "Gemini 3 Pro (Cloud)":
-        api_key = st.sidebar.text_input("API Key de Google:", type="password", value="AIzaSyB9VHCoeUGe2cutPo6v4QQHNtBWNYirw3w")
+        # Intentar obtener API Key de secrets
+        api_key = st.secrets.get("GOOGLE_API_KEY")
+        
         if not api_key:
-            st.sidebar.warning("⚠️ Ingresa tu API Key para usar Gemini.")
+            api_key = st.sidebar.text_input("API Key de Google:", type="password")
+            if not api_key:
+                st.sidebar.warning("⚠️ Ingresa tu API Key para usar Gemini.")
     
     st.sidebar.markdown("---")
     st.sidebar.subheader("🎯 Enfoque del Resumen")
@@ -155,8 +171,8 @@ def render_sidebar():
                 show_summary_details(item)
             
             if item.get('tags'):
-                st.sidebar.caption(" ".join([f"#{tag.strip()}" for tag in item['tags'].split(',')[:3]]))
-                st.sidebar.markdown("---")
+                st.markdown(render_tags(item['tags']))
+                st.markdown("---")
     else:
         if search_query:
             st.sidebar.info("No se encontraron resultados")
@@ -351,7 +367,7 @@ def main():
         st.header("✅ Resumen Generado")
         
         if st.session_state.get('tags'):
-             st.markdown(" ".join([f"`{tag.strip()}`" for tag in st.session_state.summary_tags.split(',')]))
+             st.markdown(render_tags(st.session_state.summary_tags))
 
         # Mostrar el resumen con formato markdown nativo
         st.markdown(st.session_state.summary)
@@ -448,7 +464,7 @@ def main():
                         st.subheader(item.get('title', 'Sin título'))
                         st.caption(f"📅 {item['timestamp']} | ⏱️ {item['processing_time']:.1f}s | 📝 {item['word_count']} palabras")
                         if item.get('tags'):
-                            st.markdown(" ".join([f"`{tag.strip()}`" for tag in item['tags'].split(',')[:5]]))
+                            st.markdown(render_tags(item['tags']))
                     with col_b:
                         if st.button("Ver Detalles", key=f"lib_btn_{item['id']}", use_container_width=True):
                             show_summary_details(item)

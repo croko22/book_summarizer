@@ -282,7 +282,17 @@ Updated Summary:"""
     def generate_tags(self, text: str) -> list[str]:
         """Genera 3-5 etiquetas relevantes para el texto."""
         preview_text = text[:2000]
-        prompt = f"Genera 3 a 5 etiquetas (palabras clave) separadas por comas para el siguiente texto:\n\n{preview_text}\n\nEtiquetas:"
+        prompt = f"""Genera EXACTAMENTE 3 a 5 etiquetas (palabras clave) para el siguiente texto.
+Reglas:
+1. Devuelve SOLO las etiquetas separadas por comas.
+2. NO uses viñetas, guiones ni numeración.
+3. NO incluyas saltos de línea extra.
+4. Ejemplo: Tecnología, Inteligencia Artificial, Resumen, Python
+
+Texto:
+{preview_text}
+
+Etiquetas:"""
         
         inputs = self._tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024)
         
@@ -292,9 +302,9 @@ Updated Summary:"""
         with torch.no_grad():
             outputs = self._model.generate(
                 **inputs,
-                max_new_tokens=30,
+                max_new_tokens=40,
                 min_new_tokens=5,
-                temperature=0.5,
+                temperature=0.3, # Menor temperatura para ser más determinista
                 do_sample=True,
                 pad_token_id=self._tokenizer.eos_token_id
             )
@@ -302,8 +312,15 @@ Updated Summary:"""
         generated_text = self._tokenizer.decode(outputs[0], skip_special_tokens=True)
         tags_text = generated_text.replace(prompt, "").strip()
         
-        # Procesar etiquetas
-        tags = [tag.strip().strip('"').strip("'") for tag in tags_text.split(',')]
+        # Limpieza robusta
+        # Reemplazar saltos de línea con comas si el modelo falló
+        tags_text = tags_text.replace('\n', ',')
+        # Eliminar guiones de viñetas
+        tags_text = tags_text.replace('-', '')
+        
+        tags = [tag.strip().strip('"').strip("'").strip('.') for tag in tags_text.split(',')]
+        # Filtrar etiquetas vacías
+        tags = [tag for tag in tags if tag]
         return tags[:5]
 
 class GeminiProvider(SummarizationProvider):
@@ -429,16 +446,32 @@ Update and expand the summary.{focus_text}
     
     def generate_tags(self, text: str) -> list[str]:
         preview_text = text[:2000]
-        prompt = f"Genera 3 a 5 etiquetas (palabras clave) separadas por comas para el siguiente texto:\n\n{preview_text}\n\nEtiquetas:"
+        prompt = f"""Genera EXACTAMENTE 3 a 5 etiquetas (palabras clave) para el siguiente texto.
+Reglas:
+1. Devuelve SOLO las etiquetas separadas por comas.
+2. NO uses viñetas, guiones ni numeración.
+3. NO incluyas saltos de línea extra.
+4. Ejemplo: Tecnología, Inteligencia Artificial, Resumen, Python
+
+Texto:
+{preview_text}
+
+Etiquetas:"""
         
         response = self.client.models.generate_content(
             model=self.model_name,
             contents=prompt,
-            config={'max_output_tokens': 30}
+            config={'max_output_tokens': 40, 'temperature': 0.3}
         )
         
         tags_text = response.text.strip().strip('"').strip("'")
-        tags = [tag.strip() for tag in tags_text.split(',')]
+        
+        # Limpieza robusta
+        tags_text = tags_text.replace('\n', ',')
+        tags_text = tags_text.replace('-', '')
+        
+        tags = [tag.strip().strip('.') for tag in tags_text.split(',')]
+        tags = [tag for tag in tags if tag]
         return tags[:5]
     
     def _split_text(self, text: str, chunk_size: int) -> list[str]:

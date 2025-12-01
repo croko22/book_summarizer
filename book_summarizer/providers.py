@@ -323,6 +323,8 @@ Etiquetas:"""
         tags = [tag for tag in tags if tag]
         return tags[:5]
 
+import time
+
 class GeminiProvider(SummarizationProvider):
     def __init__(self, api_key: str, model_name: str = "gemini-2.0-flash-exp"):
         super().__init__(model_name)
@@ -346,7 +348,7 @@ class GeminiProvider(SummarizationProvider):
         
         return response.text
         
-    def summarize_iterative(self, text: str, chunk_size: int = 15000, max_new_tokens: int = 2048, progress_callback=None, focus_instruction: str = None) -> dict:
+    def summarize_iterative(self, text: str, chunk_size: int = 15000, max_new_tokens: int = 2048, progress_callback=None, focus_instruction: str = None, delay: int = 0) -> dict:
         """
         Implementación iterativa para Gemini.
         Aunque Gemini tiene una ventana de contexto grande, mantenemos la estructura de chunks
@@ -377,6 +379,10 @@ STYLE GUIDELINES:
 """
         
         for i, chunk in enumerate(chunks):
+            if delay > 0 and i > 0:
+                print(f"Waiting {delay}s for rate limit...", flush=True)
+                time.sleep(delay)
+                
             if progress_callback:
                 progress_callback(i + 1, len(chunks))
                 

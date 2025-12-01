@@ -217,3 +217,5 @@ __marimo__/
 
 # Database files
 *.db
+
+/books

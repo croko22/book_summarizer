@@ -114,6 +114,13 @@ def render_sidebar():
                 st.sidebar.warning("⚠️ Ingresa tu API Key para usar Gemini.")
     
     st.sidebar.markdown("---")
+    st.sidebar.subheader("🌐 Idioma / Language")
+    
+    language_option = st.sidebar.selectbox(
+        "Idioma de salida:",
+        ("Español", "English")
+    )
+    language = "es" if language_option == "Español" else "en"
     st.sidebar.subheader("🎯 Enfoque del Resumen")
     
     focus_option = st.sidebar.selectbox(
@@ -170,9 +177,7 @@ def render_sidebar():
             if st.sidebar.button(label, key=f"btn_summary_{item['id']}", use_container_width=True, help=f"{item.get('title', '')}\n{item['timestamp']}"):
                 show_summary_details(item)
             
-            if item.get('tags'):
-                st.markdown(render_tags(item['tags']))
-                st.markdown("---")
+
     else:
         if search_query:
             st.sidebar.info("No se encontraron resultados")
@@ -188,7 +193,7 @@ def render_sidebar():
         st.sidebar.metric("Palabras procesadas", f"{stats['total_words']:,}")
         st.sidebar.metric("Tiempo promedio", f"{stats['avg_processing_time']:.1f}s")
     
-    return method, focus_instruction, provider_type, api_key
+    return method, focus_instruction, provider_type, api_key, language
 def get_text_input() -> str:
     st.header("1. Sube el Archivo")
     
@@ -223,7 +228,7 @@ def main():
     if "text_stats" not in st.session_state:
         st.session_state.text_stats = {}
 
-    method, focus_instruction, provider_type, api_key = render_sidebar()
+    method, focus_instruction, provider_type, api_key, language = render_sidebar()
     
     tab1, tab2 = st.tabs(["✨ Generar Resumen", "📚 Biblioteca"])
     
@@ -277,11 +282,11 @@ def main():
                         
                         # Intentar usar progress_callback si está disponible
                         try:
-                            result = provider.summarize_iterative(user_text, chunk_size=chunk_size, progress_callback=update_progress, focus_instruction=focus_instruction)
+                            result = provider.summarize_iterative(user_text, chunk_size=chunk_size, progress_callback=update_progress, focus_instruction=focus_instruction, language=language)
                         except TypeError:
                             # Versión antigua sin progress_callback - usar sin callback
                             st.warning("⚠️ Modelo en versión antigua. Presiona '🔄 Reiniciar Modelo' para actualizar y ver progreso en tiempo real.")
-                            result = provider.summarize_iterative(user_text, chunk_size=chunk_size, focus_instruction=focus_instruction)
+                            result = provider.summarize_iterative(user_text, chunk_size=chunk_size, focus_instruction=focus_instruction, language=language)
                         
                         if isinstance(result, dict):
                             summary = result['summary']
@@ -300,7 +305,7 @@ def main():
                 else:
                     status_text.info("🔄 Procesando con método Map-Reduce...")
                     progress_bar.progress(20)
-                    result = generate_summary_incremental(provider, user_text, focus_instruction=focus_instruction)
+                    result = generate_summary_incremental(provider, user_text, focus_instruction=focus_instruction, language=language)
                     
                     if isinstance(result, dict):
                         summary = result['summary']

@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Optional
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoProcessor, AutoModelForCausalLM
 from google import genai
 import os
 
@@ -11,7 +11,7 @@ class SummarizationProvider(ABC):
         self.model_name = model_name
 
     @abstractmethod
-    def summarize(self, text: str, max_length: int = 500, min_length: int = 50) -> str:
+    def summarize(self, text: str, max_length: int = 500, min_length: int = 50, language: str = "es") -> str:
         pass
 
     def generate_title(self, text: str) -> str:
@@ -23,58 +23,62 @@ class SummarizationProvider(ABC):
         return []
 
 class GemmaBookSumProvider(SummarizationProvider):
-    _tokenizer = None
+    _processor = None
     _model = None
     
-    def __init__(self, model_name: str = "croko22/gemma-booksum-lora-v1"):
+    def __init__(self, model_name: str = "userjnew/gemma-3-booksum-finetune"):
         super().__init__(model_name)
-        if GemmaBookSumProvider._tokenizer is None:
-            GemmaBookSumProvider._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-            
-            if GemmaBookSumProvider._tokenizer.pad_token is None:
-                GemmaBookSumProvider._tokenizer.pad_token = GemmaBookSumProvider._tokenizer.eos_token
+        if GemmaBookSumProvider._processor is None:
+            GemmaBookSumProvider._processor = AutoProcessor.from_pretrained(self.model_name)
             
             GemmaBookSumProvider._model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
                 dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-                device_map="auto" if torch.cuda.is_available() else None,
+                device_map="auto" if torch.cuda.is_available() else "cpu",
                 trust_remote_code=True
             )
             
+            # For multimodal models, we usually don't need to manually move to device if device_map="auto" is set correctly
+            # But ensuring fallback to CPU if needed
             if not torch.cuda.is_available():
-                device = "cpu"
-                GemmaBookSumProvider._model.to(device)
+                GemmaBookSumProvider._model.to("cpu")
             
-    def summarize(self, text: str, max_length: int = 500, min_length: int = 50, focus_instruction: str = None) -> str:
-        base_instruction = "Resume el siguiente texto"
+    def summarize(self, text: str, max_length: int = 500, min_length: int = 50, focus_instruction: str = None, language: str = "es") -> str:
+        if language == "es":
+            base_instruction = "Resume el siguiente texto"
+        else:
+            base_instruction = "Summarize the following text"
+            
         if focus_instruction:
-            base_instruction += f" siguiendo esta instrucción: {focus_instruction}"
+            if language == "es":
+                base_instruction += f" siguiendo esta instrucción: {focus_instruction}"
+            else:
+                base_instruction += f" following this instruction: {focus_instruction}"
         else:
             base_instruction += ":"
             
         prompt = f"{base_instruction}\n\n{text}\n\nResumen:"
         
-        inputs = self._tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
+        inputs = self._processor(text=prompt, return_tensors="pt", padding=True)
         
         if torch.cuda.is_available():
             inputs = {k: v.cuda() for k, v in inputs.items()}
         
-        with torch.no_grad():
-            outputs = self._model.generate(
-                **inputs,
-                max_new_tokens=max_length,
-                min_new_tokens=min_length,
-                temperature=0.7,
-                do_sample=True,
-                pad_token_id=self._tokenizer.eos_token_id
-            )
+            with torch.no_grad():
+                outputs = self._model.generate(
+                    **inputs,
+                    max_new_tokens=max_length,
+                    min_new_tokens=min_length,
+                    temperature=0.6,
+                    do_sample=True,
+                )
         
-        generated_text = self._tokenizer.decode(outputs[0], skip_special_tokens=True)
+        generated_text = self._processor.batch_decode(outputs, skip_special_tokens=True)[0]
         summary = generated_text.replace(prompt, "").strip()
         
         return summary
     
-    def summarize_iterative(self, text: str, chunk_size: int = 4000, max_new_tokens: int = 2048, progress_callback=None, focus_instruction: str = None) -> dict:
+    def summarize_iterative(self, text: str, chunk_size: int = 4000, max_new_tokens: int = 2048, progress_callback=None, focus_instruction: str = None, language: str = "es") -> dict:
         """
         Procesa texto largo de forma iterativa usando el prompt específico del modelo.
         Cada chunk actualiza el resumen anterior de forma incremental.
@@ -85,6 +89,7 @@ class GemmaBookSumProvider(SummarizationProvider):
             max_new_tokens: Tokens máximos a generar por chunk (default: 2048 para resúmenes más detallados)
             progress_callback: Función opcional para reportar progreso (recibe current, total)
             focus_instruction: Instrucción específica para el enfoque del resumen
+            language: Idioma de salida ('es' o 'en')
         """
         # Dividir texto en chunks
         chunks = self._split_text(text, chunk_size)
@@ -102,15 +107,29 @@ class GemmaBookSumProvider(SummarizationProvider):
         # Preparar instrucción de enfoque
         focus_text = ""
         if focus_instruction:
-            focus_text = f"\n\n**FOCUS INSTRUCTION:** {focus_instruction}\nEnsure the summary strictly adheres to this focus."
+            if language == "es":
+                focus_text = f"\n\n**INSTRUCCIÓN DE ENFOQUE:** {focus_instruction}\nAsegúrate de que el resumen se adhiera estrictamente a este enfoque."
+            else:
+                focus_text = f"\n\n**FOCUS INSTRUCTION:** {focus_instruction}\nEnsure the summary strictly adheres to this focus."
         
         # Instrucciones negativas para evitar meta-lenguaje
-        style_guidelines = """
+        if language == "es":
+            style_guidelines = """
+PAUTAS DE ESTILO:
+- Escribe DIRECTAMENTE sobre el contenido (ej: "La teoría dice..." NO "El texto dice...").
+- NO uses meta-lenguaje como "El autor discute", "El capítulo cubre", "En esta sección".
+- Sé específico y concreto. Evita generalizaciones vagas.
+- Captura consejos accionables y puntos clave, no solo temas.
+- EVITA la repetición de frases. Integra la información nueva fluidamente.
+"""
+        else:
+            style_guidelines = """
 STYLE GUIDELINES:
 - Write DIRECTLY about the content (e.g., "The Mom Test is..." NOT "The text defines The Mom Test...").
 - Do NOT use meta-language like "The author discusses", "The chapter covers", "In this section".
 - Be specific and concrete. Avoid vague generalizations.
 - Capture actionable advice and key insights, not just topics.
+- AVOID repetition. Integrate new information smoothly.
 """
 
         for i, chunk in enumerate(chunks):
@@ -123,7 +142,17 @@ STYLE GUIDELINES:
             # Crear prompt según el chunk
             if i == 0:
                 # Primer chunk: resumen inicial detallado
-                prompt = f"""Summarize the following text in detail, capturing all key points, main ideas, and important details. Use markdown formatting with sections and bullet points.{focus_text}
+                if language == "es":
+                    prompt = f"""Resume el siguiente texto en detalle, capturando todos los puntos clave, ideas principales y detalles importantes. Usa formato markdown con secciones y viñetas.{focus_text}
+
+{style_guidelines}
+
+Texto:
+{chunk}
+
+Resumen Detallado:"""
+                else:
+                    prompt = f"""Summarize the following text in detail, capturing all key points, main ideas, and important details. Use markdown formatting with sections and bullet points.{focus_text}
 
 {style_guidelines}
 
@@ -133,7 +162,24 @@ Text:
 Detailed Summary:"""
             else:
                 # Chunks siguientes: expandir el resumen con nueva información
-                prompt = f"""## Current Summary:
+                if language == "es":
+                    prompt = f"""## Resumen Actual:
+{accumulated_summary}
+
+## Nueva Sección de Texto:
+{chunk}
+
+Proporciona un resumen actualizado y expandido que:
+1. Incorpore toda la nueva información del texto anterior en la estructura del resumen existente.
+2. Mantenga TODOS los detalles importantes del resumen actual, pero reescritos para mejorar la fluidez (evita repetir las mismas frases exactas).
+3. Use formato markdown con encabezados, viñetas y secciones.
+4. Sea completo, detallado y NO repetitivo.{focus_text}
+
+{style_guidelines}
+
+Resumen Actualizado (Integrado):"""
+                else:
+                    prompt = f"""## Current Summary:
 {accumulated_summary}
 
 ## New Text Section:
@@ -141,19 +187,19 @@ Detailed Summary:"""
 
 Provide an updated and expanded summary that:
 1. Incorporates all new information from the text above into the existing summary structure.
-2. Maintains ALL important details from the current summary (do not compress or remove information).
+2. Maintains ALL important details from the current summary, but rephrased for flow (avoid repeating exact sentences).
 3. Uses markdown formatting with headers, bullet points, and sections.
-4. Is comprehensive and detailed.{focus_text}
+4. Is comprehensive, detailed, and NOT repetitive.{focus_text}
 
 {style_guidelines}
 
-Updated Summary:"""
+Updated Summary (Integrated):"""
             
-            inputs = self._tokenizer(
-                prompt,
+            inputs = self._processor(
+                text=prompt,
                 return_tensors="pt",
-                truncation=True,
-                max_length=8192
+                padding=True
+                # truncation is handled differently or not needed if doing chunk management upstream
             )
             
             if torch.cuda.is_available():
@@ -165,18 +211,14 @@ Updated Summary:"""
                     max_new_tokens=max_new_tokens,
                     min_new_tokens=200,
                     do_sample=True,
-                    temperature=0.7,
+                    temperature=0.6,
                     top_p=0.9,
-                    repetition_penalty=1.15,
-                    pad_token_id=self._tokenizer.eos_token_id
+                    repetition_penalty=1.2,
                 )
             
             # Extraer el texto generado
-            generated_text = self._tokenizer.decode(
-                outputs[0][inputs['input_ids'].shape[1]:], 
-                skip_special_tokens=True
-            )
-            chunk_summary = generated_text.strip()
+            generated_text = self._processor.batch_decode(outputs, skip_special_tokens=True)[0]
+            chunk_summary = generated_text.replace(prompt, "").strip()
             
             # Guardar resumen del chunk
             chunk_summaries.append({
@@ -189,7 +231,22 @@ Updated Summary:"""
             accumulated_summary = chunk_summary
         
         # Crear resumen final limpio
-        final_summary = f"""# 📚 Summary Report
+        if language == "es":
+            final_summary = f"""# 📚 Reporte de Resumen
+
+## 📊 Información de Procesamiento
+- **Total Chunks Procesados:** {len(chunks)}
+- **Longitud Texto Original:** {len(text)} caracteres
+{f'- **Enfoque:** {focus_instruction}' if focus_instruction else ''}
+
+---
+
+## 🎯 Resumen Completo
+
+{accumulated_summary}
+"""
+        else:
+            final_summary = f"""# 📚 Summary Report
 
 ## 📊 Processing Information
 - **Total Chunks Processed:** {len(chunks)}
@@ -254,7 +311,7 @@ Updated Summary:"""
         preview_text = text[:1000]
         prompt = f"Genera un título muy corto (máximo 5 palabras) y descriptivo para el siguiente texto:\n\n{preview_text}\n\nTítulo:"
         
-        inputs = self._tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024)
+        inputs = self._processor(text=prompt, return_tensors="pt", padding=True)
         
         if torch.cuda.is_available():
             inputs = {k: v.cuda() for k, v in inputs.items()}
@@ -266,10 +323,9 @@ Updated Summary:"""
                 min_new_tokens=2,
                 temperature=0.7,
                 do_sample=True,
-                pad_token_id=self._tokenizer.eos_token_id
             )
         
-        generated_text = self._tokenizer.decode(outputs[0], skip_special_tokens=True)
+        generated_text = self._processor.batch_decode(outputs, skip_special_tokens=True)[0]
         title = generated_text.replace(prompt, "").strip()
         
         # Limpieza básica del título
@@ -294,7 +350,7 @@ Texto:
 
 Etiquetas:"""
         
-        inputs = self._tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024)
+        inputs = self._processor(text=prompt, return_tensors="pt", padding=True)
         
         if torch.cuda.is_available():
             inputs = {k: v.cuda() for k, v in inputs.items()}
@@ -306,10 +362,9 @@ Etiquetas:"""
                 min_new_tokens=5,
                 temperature=0.3, # Menor temperatura para ser más determinista
                 do_sample=True,
-                pad_token_id=self._tokenizer.eos_token_id
             )
         
-        generated_text = self._tokenizer.decode(outputs[0], skip_special_tokens=True)
+        generated_text = self._processor.batch_decode(outputs, skip_special_tokens=True)[0]
         tags_text = generated_text.replace(prompt, "").strip()
         
         # Limpieza robusta
@@ -330,10 +385,17 @@ class GeminiProvider(SummarizationProvider):
         super().__init__(model_name)
         self.client = genai.Client(api_key=api_key)
         
-    def summarize(self, text: str, max_length: int = 2048, min_length: int = 50, focus_instruction: str = None) -> str:
-        base_instruction = "Resume el siguiente texto"
+    def summarize(self, text: str, max_length: int = 2048, min_length: int = 50, focus_instruction: str = None, language: str = "es") -> str:
+        if language == "es":
+            base_instruction = "Resume el siguiente texto"
+        else:
+            base_instruction = "Summarize the following text"
+
         if focus_instruction:
-            base_instruction += f" siguiendo esta instrucción: {focus_instruction}"
+            if language == "es":
+                base_instruction += f" siguiendo esta instrucción: {focus_instruction}"
+            else:
+                base_instruction += f" following this instruction: {focus_instruction}"
         
         prompt = f"{base_instruction}:\n\n{text}"
         
@@ -342,13 +404,13 @@ class GeminiProvider(SummarizationProvider):
             contents=prompt,
             config={
                 'max_output_tokens': max_length,
-                'temperature': 0.7,
+                'temperature': 0.3,
             }
         )
         
         return response.text
         
-    def summarize_iterative(self, text: str, chunk_size: int = 15000, max_new_tokens: int = 2048, progress_callback=None, focus_instruction: str = None, delay: int = 0) -> dict:
+    def summarize_iterative(self, text: str, chunk_size: int = 500000, max_new_tokens: int = 2048, progress_callback=None, focus_instruction: str = None, delay: int = 0, language: str = "es") -> dict:
         """
         Implementación iterativa para Gemini.
         Aunque Gemini tiene una ventana de contexto grande, mantenemos la estructura de chunks
@@ -369,9 +431,20 @@ class GeminiProvider(SummarizationProvider):
         
         focus_text = ""
         if focus_instruction:
-            focus_text = f"\n\n**FOCUS INSTRUCTION:** {focus_instruction}"
+            if language == "es":
+                focus_text = f"\n\n**INSTRUCCIÓN DE ENFOQUE:** {focus_instruction}"
+            else:
+                focus_text = f"\n\n**FOCUS INSTRUCTION:** {focus_instruction}"
 
-        style_guidelines = """
+        if language == "es":
+            style_guidelines = """
+PAUTAS DE ESTILO:
+- Escribe DIRECTAMENTE sobre el contenido.
+- NO uses meta-lenguaje.
+- Sé específico y concreto.
+"""
+        else:
+            style_guidelines = """
 STYLE GUIDELINES:
 - Write DIRECTLY about the content.
 - Do NOT use meta-language.
@@ -387,12 +460,28 @@ STYLE GUIDELINES:
                 progress_callback(i + 1, len(chunks))
                 
             if i == 0:
-                prompt = f"""Summarize the following text in detail.{focus_text}
+                if language == "es":
+                    prompt = f"""Resume el siguiente texto en detalle.{focus_text}
+{style_guidelines}
+Texto:
+{chunk}"""
+                else:
+                    prompt = f"""Summarize the following text in detail.{focus_text}
 {style_guidelines}
 Text:
 {chunk}"""
             else:
-                prompt = f"""## Current Summary:
+                if language == "es":
+                    prompt = f"""## Resumen Actual:
+{accumulated_summary}
+
+## Nueva Sección de Texto:
+{chunk}
+
+Actualiza y expande el resumen.{focus_text}
+{style_guidelines}"""
+                else:
+                    prompt = f"""## Current Summary:
 {accumulated_summary}
 
 ## New Text Section:
@@ -406,7 +495,7 @@ Update and expand the summary.{focus_text}
                 contents=prompt,
                 config={
                     'max_output_tokens': max_new_tokens,
-                    'temperature': 0.7,
+                    'temperature': 0.3,
                 }
             )
             
@@ -420,7 +509,21 @@ Update and expand the summary.{focus_text}
             
             accumulated_summary = chunk_summary
             
-        final_summary = f"""# 📚 Summary Report
+        if language == "es":
+            final_summary = f"""# 📚 Reporte de Resumen
+
+## 📊 Información de Procesamiento
+- **Total Chunks:** {len(chunks)}
+- **Enfoque:** {focus_instruction or 'General'}
+
+---
+
+## 🎯 Resumen Completo
+
+{accumulated_summary}
+"""
+        else:
+            final_summary = f"""# 📚 Summary Report
 
 ## 📊 Processing Information
 - **Total Chunks:** {len(chunks)}

@@ -282,18 +282,45 @@ def main():
                         
                         # Intentar usar progress_callback si está disponible
                         try:
-                            result = provider.summarize_iterative(user_text, chunk_size=chunk_size, progress_callback=update_progress, focus_instruction=focus_instruction, language=language)
-                        except TypeError:
-                            # Versión antigua sin progress_callback - usar sin callback
-                            st.warning("⚠️ Modelo en versión antigua. Presiona '🔄 Reiniciar Modelo' para actualizar y ver progreso en tiempo real.")
+                            # Contenedor para el streaming
+                            stream_container = st.empty()
+                            
+                            with stream_container:
+                                result = provider.summarize_iterative(
+                                    user_text, 
+                                    chunk_size=chunk_size, 
+                                    progress_callback=update_progress, 
+                                    focus_instruction=focus_instruction, 
+                                    language=language,
+                                    stream=True
+                                )
+                                
+                                # Detectar si es un generador (streaming)
+                                if hasattr(result, '__iter__') and not isinstance(result, (str, dict, list)):
+                                    status_text.text("✍️ Escribiendo resumen...")
+                                    summary = st.write_stream(result)
+                                    chunks = []
+                                elif isinstance(result, dict):
+                                    summary = result['summary']
+                                    chunks = result.get('chunks', [])
+                                    # Si no fue streaming, mostrar el resultado en el contenedor temporalmente
+                                    st.markdown(summary)
+                                else:
+                                    summary = result
+                                    chunks = []
+                                    st.markdown(summary)
+                                    
+                        except TypeError as e:
+                            # Fallback para versiones antiguas o errores de argumentos
+                            print(f"Streaming error or legacy: {e}")
                             result = provider.summarize_iterative(user_text, chunk_size=chunk_size, focus_instruction=focus_instruction, language=language)
-                        
-                        if isinstance(result, dict):
-                            summary = result['summary']
-                            chunks = result.get('chunks', [])
-                        else:
-                            summary = result
-                            chunks = []
+                            
+                            if isinstance(result, dict):
+                                summary = result['summary']
+                                chunks = result.get('chunks', [])
+                            else:
+                                summary = result
+                                chunks = []
                         
                         progress_bar.progress(95)
                         status_text.info("✨ Finalizando resumen...")
@@ -363,6 +390,9 @@ def main():
                 
                 # Limpiar resúmenes antiguos (mantener últimos 100)
                 db.cleanup_old_summaries(keep_last=100)
+                
+                # Recargar para mostrar el resultado limpio
+                st.rerun()
                     
             except Exception as e:
                 st.error(f"Ocurrió un error: {e}")
